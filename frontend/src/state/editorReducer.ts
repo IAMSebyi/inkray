@@ -9,9 +9,12 @@ import {
 } from '../editor/viewportTransforms';
 import type {
   EditorTool,
+  GeometryData,
+  GeometryState,
   LoadedImage,
   Point2D,
   Size2D,
+  ViewMode,
   ViewportTransform,
   ZoomMode,
 } from '../types/editor';
@@ -24,6 +27,8 @@ export interface EditorState {
   zoomMode: ZoomMode;
   viewportSize: Size2D;
   activeTool: EditorTool;
+  viewMode: ViewMode;
+  geometry: GeometryState;
 }
 
 export type EditorAction =
@@ -36,7 +41,18 @@ export type EditorAction =
   | { type: 'FIT_TO_SCREEN' }
   | { type: 'ZOOM_ACTUAL_SIZE' }
   | { type: 'ZOOM_STEP'; direction: 'in' | 'out'; anchor?: Point2D }
-  | { type: 'SET_ACTIVE_TOOL'; tool: EditorTool };
+  | { type: 'SET_ACTIVE_TOOL'; tool: EditorTool }
+  | { type: 'SET_VIEW_MODE'; mode: ViewMode }
+  | { type: 'GEOMETRY_START' }
+  | { type: 'GEOMETRY_SUCCESS'; data: GeometryData }
+  | { type: 'GEOMETRY_ERROR'; imageId: string; message: string }
+  | { type: 'GEOMETRY_CANCEL' };
+
+const IDLE_GEOMETRY: GeometryState = {
+  status: 'idle',
+  data: null,
+  error: null,
+};
 
 export const initialEditorState: EditorState = {
   image: null,
@@ -46,6 +62,8 @@ export const initialEditorState: EditorState = {
   zoomMode: 'fit',
   viewportSize: { width: 0, height: 0 },
   activeTool: 'pointer',
+  viewMode: 'rgb',
+  geometry: IDLE_GEOMETRY,
 };
 
 function getImageSize(image: LoadedImage): Size2D {
@@ -74,6 +92,8 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
         error: null,
         zoomMode: 'fit',
         transform,
+        viewMode: 'rgb',
+        geometry: IDLE_GEOMETRY,
       };
     }
 
@@ -182,6 +202,71 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
       return {
         ...state,
         activeTool: action.tool,
+      };
+
+    case 'SET_VIEW_MODE': {
+      if (action.mode === 'rgb') {
+        return state.viewMode === 'rgb' ? state : { ...state, viewMode: 'rgb' };
+      }
+      const readyData = state.geometry.status === 'ready' ? state.geometry.data : null;
+      if (!readyData) {
+        return state;
+      }
+      if (action.mode === 'normals' && !readyData.previews.normals) {
+        return state;
+      }
+      return {
+        ...state,
+        viewMode: action.mode,
+      };
+    }
+
+    case 'GEOMETRY_START':
+      if (!state.image) {
+        return state;
+      }
+      return {
+        ...state,
+        viewMode: 'rgb',
+        geometry: {
+          status: 'loading',
+          data: null,
+          error: null,
+        },
+      };
+
+    case 'GEOMETRY_SUCCESS':
+      // Ignore stale responses if the user replaced the image before completion.
+      if (!state.image || state.image.id !== action.data.imageId) {
+        return state;
+      }
+      return {
+        ...state,
+        geometry: {
+          status: 'ready',
+          data: action.data,
+          error: null,
+        },
+      };
+
+    case 'GEOMETRY_ERROR':
+      if (!state.image || state.image.id !== action.imageId) {
+        return state;
+      }
+      return {
+        ...state,
+        geometry: {
+          status: 'error',
+          data: null,
+          error: action.message,
+        },
+      };
+
+    case 'GEOMETRY_CANCEL':
+      return {
+        ...state,
+        viewMode: 'rgb',
+        geometry: IDLE_GEOMETRY,
       };
   }
 }

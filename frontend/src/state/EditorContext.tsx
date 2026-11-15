@@ -1,6 +1,14 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, type ReactNode } from 'react';
+import { fetchGeometryForImage } from '../api/geometryClient';
 import { ImageLoadError, loadImageFromFile } from '../editor/imageLoader';
-import type { EditorTool, LoadedImage, Size2D, ViewportTransform, ZoomMode } from '../types/editor';
+import type {
+  EditorTool,
+  LoadedImage,
+  Size2D,
+  ViewMode,
+  ViewportTransform,
+  ZoomMode,
+} from '../types/editor';
 import { createCursorStore, type CursorStore } from './cursorStore';
 import { EditorContext, type EditorContextValue } from './editorContextValue';
 import { editorReducer, initialEditorState } from './editorReducer';
@@ -15,6 +23,8 @@ export function EditorProvider({ children }: { children: ReactNode }) {
   const cursorStore = cursorStoreRef.current;
 
   const activeAbortRef = useRef<AbortController | null>(null);
+  const geometryAbortRef = useRef<AbortController | null>(null);
+  const geometryInFlightRef = useRef(false);
   const activeImageRef = useRef<LoadedImage | null>(null);
 
   useEffect(() => {
@@ -24,6 +34,7 @@ export function EditorProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     return () => {
       activeAbortRef.current?.abort();
+      geometryAbortRef.current?.abort();
       activeImageRef.current?.dispose();
     };
   }, []);
@@ -46,6 +57,10 @@ export function EditorProvider({ children }: { children: ReactNode }) {
           nextImage.dispose();
           return;
         }
+
+        geometryAbortRef.current?.abort();
+        geometryAbortRef.current = null;
+        geometryInFlightRef.current = false;
 
         const previousImage = activeImageRef.current;
         activeImageRef.current = nextImage;
@@ -74,6 +89,48 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     },
     [cursorStore],
   );
+
+  const generateGeometry = useCallback(async () => {
+    const targetImage = activeImageRef.current;
+    if (!targetImage || geometryInFlightRef.current) {
+      return;
+    }
+
+    geometryInFlightRef.current = true;
+    const abortController = new AbortController();
+    geometryAbortRef.current = abortController;
+    dispatch({ type: 'GEOMETRY_START' });
+
+    try {
+      const data = await fetchGeometryForImage(targetImage, abortController.signal);
+      if (abortController.signal.aborted || activeImageRef.current?.id !== targetImage.id) {
+        return;
+      }
+      dispatch({ type: 'GEOMETRY_SUCCESS', data });
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        return;
+      }
+      if (activeImageRef.current?.id !== targetImage.id) {
+        return;
+      }
+      const message =
+        error instanceof Error ? error.message : 'Failed to generate geometry from backend.';
+      dispatch({ type: 'GEOMETRY_ERROR', imageId: targetImage.id, message });
+    } finally {
+      if (geometryAbortRef.current === abortController) {
+        geometryAbortRef.current = null;
+        geometryInFlightRef.current = false;
+      }
+    }
+  }, []);
+
+  const cancelGeometry = useCallback(() => {
+    geometryAbortRef.current?.abort();
+    geometryAbortRef.current = null;
+    geometryInFlightRef.current = false;
+    dispatch({ type: 'GEOMETRY_CANCEL' });
+  }, []);
 
   const clearError = useCallback(() => {
     dispatch({ type: 'CLEAR_ERROR' });
@@ -107,6 +164,10 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     dispatch({ type: 'SET_ACTIVE_TOOL', tool });
   }, []);
 
+  const setViewMode = useCallback((mode: ViewMode) => {
+    dispatch({ type: 'SET_VIEW_MODE', mode });
+  }, []);
+
   const value = useMemo<EditorContextValue>(
     () => ({
       state,
@@ -122,6 +183,9 @@ export function EditorProvider({ children }: { children: ReactNode }) {
       zoomIn,
       zoomOut,
       setActiveTool,
+      setViewMode,
+      generateGeometry,
+      cancelGeometry,
     }),
     [
       state,
@@ -136,6 +200,9 @@ export function EditorProvider({ children }: { children: ReactNode }) {
       zoomIn,
       zoomOut,
       setActiveTool,
+      setViewMode,
+      generateGeometry,
+      cancelGeometry,
     ],
   );
 

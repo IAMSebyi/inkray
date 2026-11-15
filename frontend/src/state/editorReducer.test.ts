@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { LoadedImage } from '../types/editor';
+import type { GeometryData, LoadedImage } from '../types/editor';
 import { editorReducer, initialEditorState } from './editorReducer';
 
 function createStubImage(id: string, width: number, height: number): LoadedImage {
@@ -18,6 +18,48 @@ function createStubImage(id: string, width: number, height: number): LoadedImage
     objectUrl: `blob:${id}`,
     getPixelData: () => ({}) as ImageData,
     dispose: () => {},
+  };
+}
+
+function createStubGeometry(imageId: string, withNormals = true): GeometryData {
+  return {
+    imageId,
+    metadata: {
+      id: 'abc123',
+      cache_version: 1,
+      image_sha256: 'deadbeef',
+      model_id: 'Ruicheng/moge-3-vitl',
+      resolution_level: 9,
+      refine_steps: 3,
+      use_fp16: true,
+      max_image_size: 1024,
+      original_width: 100,
+      original_height: 100,
+      inference_width: 100,
+      inference_height: 100,
+      coordinate_system: 'opencv',
+      intrinsics_convention: 'normalized',
+      intrinsics: [
+        [0.9, 0, 0.5],
+        [0, 0.9, 0.5],
+        [0, 0, 1],
+      ],
+      depth_range: [1, 5],
+      valid_pixel_count: 10000,
+      has_normals: withNormals,
+      cached: false,
+      arrays: {},
+    },
+    depth: new Float32Array(0),
+    points: new Float32Array(0),
+    mask: new Uint8Array(0),
+    normals: withNormals ? new Float32Array(0) : null,
+    colors: new Uint8ClampedArray(0),
+    previews: {
+      depth: {} as HTMLCanvasElement,
+      normals: withNormals ? ({} as HTMLCanvasElement) : null,
+      mask: {} as HTMLCanvasElement,
+    },
   };
 }
 
@@ -92,5 +134,46 @@ describe('editorReducer', () => {
       size: { width: 900, height: 700 },
     });
     expect(state.transform.zoom).toBe(zoomedValue);
+  });
+
+  it('manages geometry lifecycle, view modes, and drops stale results on image replace', () => {
+    const img1 = createStubImage('img-1', 800, 600);
+    const img2 = createStubImage('img-2', 800, 600);
+
+    let state = editorReducer(initialEditorState, { type: 'IMPORT_SUCCESS', image: img1 });
+    // Cannot enter geometry view modes before geometry is ready.
+    state = editorReducer(state, { type: 'SET_VIEW_MODE', mode: 'depth' });
+    expect(state.viewMode).toBe('rgb');
+
+    state = editorReducer(state, { type: 'GEOMETRY_START' });
+    expect(state.geometry.status).toBe('loading');
+
+    // Replace image mid-inference, then deliver stale img-1 result.
+    state = editorReducer(state, { type: 'IMPORT_SUCCESS', image: img2 });
+    expect(state.geometry.status).toBe('idle');
+    expect(state.viewMode).toBe('rgb');
+
+    state = editorReducer(state, {
+      type: 'GEOMETRY_SUCCESS',
+      data: createStubGeometry('img-1'),
+    });
+    expect(state.geometry.status).toBe('idle');
+    expect(state.geometry.data).toBeNull();
+
+    // Deliver matching img-2 geometry.
+    const geom2 = createStubGeometry('img-2', false);
+    state = editorReducer(state, { type: 'GEOMETRY_START' });
+    state = editorReducer(state, { type: 'GEOMETRY_SUCCESS', data: geom2 });
+    expect(state.geometry.status).toBe('ready');
+
+    state = editorReducer(state, { type: 'SET_VIEW_MODE', mode: 'pointcloud' });
+    expect(state.viewMode).toBe('pointcloud');
+
+    // Normals mode stays blocked if normals preview is absent.
+    state = editorReducer(state, { type: 'SET_VIEW_MODE', mode: 'normals' });
+    expect(state.viewMode).toBe('pointcloud');
+
+    state = editorReducer(state, { type: 'SET_VIEW_MODE', mode: 'rgb' });
+    expect(state.viewMode).toBe('rgb');
   });
 });

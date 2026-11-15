@@ -57,3 +57,58 @@ export interface ImageCoordinateSample {
 export type EditorTool = 'pointer' | 'hand';
 
 export type ZoomMode = 'fit' | 'custom';
+
+export type ViewMode = 'rgb' | 'depth' | 'normals' | 'mask' | 'pointcloud';
+
+export type GeometryStatus = 'idle' | 'loading' | 'ready' | 'error';
+
+export interface GeometryArraySpec {
+  shape: number[];
+  dtype: string;
+}
+
+export interface GeometryMetadata {
+  id: string;
+  cache_version: number;
+  image_sha256: string;
+  model_id: string;
+  resolution_level: number;
+  refine_steps: number;
+  use_fp16: boolean;
+  max_image_size: number;
+  original_width: number;
+  original_height: number;
+  inference_width: number;
+  inference_height: number;
+  coordinate_system: 'opencv';
+  intrinsics_convention: 'normalized';
+  intrinsics: number[][];
+  depth_range: [number, number] | null;
+  valid_pixel_count: number;
+  has_normals: boolean;
+  cached: boolean;
+  arrays: Record<string, GeometryArraySpec>;
+}
+
+export interface GeometryPreviews {
+  depth: HTMLCanvasElement;
+  normals: HTMLCanvasElement | null;
+  mask: HTMLCanvasElement;
+}
+
+export interface GeometryData {
+  imageId: string;
+  metadata: GeometryMetadata;
+  depth: Float32Array;
+  points: Float32Array;
+  mask: Uint8Array;
+  normals: Float32Array | null;
+  colors: Uint8ClampedArray;
+  previews: GeometryPreviews;
+}
+
+export interface GeometryState {
+  status: GeometryStatus;
+  data: GeometryData | null;
+  error: string | null;
+}
