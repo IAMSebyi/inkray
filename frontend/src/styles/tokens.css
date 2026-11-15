@@ -1,0 +1,45 @@
+:root {
+  /* Neutral dark studio surface tones */
+  --bg-canvas: #121316;
+  --bg-chrome: #191b20;
+  --bg-surface: #22252c;
+  --bg-hover: #2b2f38;
+  --bg-active: #323845;
+
+  /* Borders */
+  --border-subtle: #262932;
+  --border-strong: #373c48;
+
+  /* Typography */
+  --text-primary: #edf0f5;
+  --text-secondary: #9aa3b4;
+  --text-muted: #656e80;
+  --text-disabled: #495060;
+
+  /* Accent */
+  --accent: #4c8dff;
+  --accent-hover: #649cff;
+  --accent-subtle: rgba(76, 141, 255, 0.14);
+  --accent-border: rgba(76, 141, 255, 0.45);
+
+  /* Feedback */
+  --danger: #e4646c;
+  --danger-bg: rgba(34, 19, 22, 0.94);
+  --danger-border: rgba(228, 100, 108, 0.42);
+
+  /* Fonts */
+  --font-sans:
+    'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+  --font-mono:
+    'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
+    monospace;
+
+  /* Layout sizing */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --toolbar-height: 44px;
+  --rail-width: 44px;
+  --sidebar-width: 272px;
+  --statusbar-height: 26px;
+}
