@@ -1,6 +1,15 @@
-import { FolderOpen, Maximize2, Minus, Plus } from 'lucide-react';
+import { Box, FolderOpen, Maximize2, Minus, Plus, X } from 'lucide-react';
 import { useEditor } from '../hooks/useEditor';
+import type { ViewMode } from '../types/editor';
 import { formatZoomPercent } from '../utils/format';
+
+const VIEW_MODE_OPTIONS: Array<{ mode: ViewMode; label: string; title: string }> = [
+  { mode: 'rgb', label: 'RGB', title: 'Original color image' },
+  { mode: 'depth', label: 'Depth', title: 'Inferred depth map' },
+  { mode: 'normals', label: 'Normals', title: 'Inferred surface normals' },
+  { mode: 'mask', label: 'Mask', title: 'Valid geometry mask' },
+  { mode: 'pointcloud', label: '3D', title: 'Interactive 3D point cloud' },
+];
 
 function InkrayMark() {
   return (
@@ -31,10 +40,29 @@ function InkrayMark() {
 }
 
 export function TopToolbar() {
-  const { state, openFilePicker, fitToScreen, zoomToActualSize, zoomIn, zoomOut } = useEditor();
+  const {
+    state,
+    openFilePicker,
+    fitToScreen,
+    zoomToActualSize,
+    zoomIn,
+    zoomOut,
+    setViewMode,
+    generateGeometry,
+    cancelGeometry,
+  } = useEditor();
 
   const hasImage = state.image !== null;
-  const zoomLabel = hasImage ? formatZoomPercent(state.transform.zoom) : '—';
+  const geometryData = state.geometry.data;
+  const hasGeometry = geometryData !== null;
+  const isGeneratingGeometry = state.geometry.status === 'loading';
+  const isPointCloudMode = state.viewMode === 'pointcloud';
+  const zoomDisabled = !hasImage || isPointCloudMode;
+  const zoomLabel = !hasImage
+    ? '—'
+    : isPointCloudMode
+      ? '3D'
+      : formatZoomPercent(state.transform.zoom);
 
   const blurAfterAction = (event: React.MouseEvent<HTMLButtonElement>, action: () => void) => {
     event.currentTarget.blur();
@@ -62,15 +90,69 @@ export function TopToolbar() {
           <FolderOpen size={14} strokeWidth={1.75} />
           <span>{hasImage ? 'Replace Image' : 'Import Image'}</span>
         </button>
+
+        {isGeneratingGeometry ? (
+          <button
+            type="button"
+            className="toolbar-button toolbar-button-busy"
+            onClick={(e) => blurAfterAction(e, cancelGeometry)}
+            title="Cancel running geometry inference"
+          >
+            <X size={14} strokeWidth={1.75} />
+            <span>Cancel Inference</span>
+          </button>
+        ) : (
+          <button
+            type="button"
+            className={`toolbar-button ${hasGeometry ? 'is-completed' : ''}`}
+            onClick={(e) =>
+              blurAfterAction(e, () => {
+                void generateGeometry();
+              })
+            }
+            disabled={!hasImage || state.isLoading}
+            title="Infer 3D geometry with MoGe-3"
+          >
+            <Box size={14} strokeWidth={1.75} />
+            <span>
+              {state.geometry.status === 'error' ? 'Retry Geometry' : 'Generate Geometry'}
+            </span>
+          </button>
+        )}
       </div>
 
       <div className="toolbar-group toolbar-viewport-controls">
+        <div className="segmented-control view-mode-control" role="group" aria-label="View mode">
+          {VIEW_MODE_OPTIONS.map((option) => {
+            const optionDisabled =
+              !hasImage ||
+              (option.mode !== 'rgb' && !hasGeometry) ||
+              (option.mode === 'normals' && !geometryData?.previews.normals);
+
+            return (
+              <button
+                key={option.mode}
+                type="button"
+                className={`view-mode-button ${state.viewMode === option.mode ? 'is-active' : ''}`}
+                onClick={(e) => blurAfterAction(e, () => setViewMode(option.mode))}
+                disabled={optionDisabled}
+                aria-pressed={state.viewMode === option.mode}
+                title={option.title}
+              >
+                {option.label}
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="toolbar-divider" aria-hidden="true" />
+
         <div className="segmented-control" role="group" aria-label="Zoom controls">
           <button
             type="button"
             className="toolbar-icon-button"
             onClick={(e) => blurAfterAction(e, zoomOut)}
-            disabled={!hasImage}
+            disabled={zoomDisabled}
             aria-label="Zoom out"
             title="Zoom out (-)"
           >
@@ -85,7 +167,7 @@ export function TopToolbar() {
             type="button"
             className="toolbar-icon-button"
             onClick={(e) => blurAfterAction(e, zoomIn)}
-            disabled={!hasImage}
+            disabled={zoomDisabled}
             aria-label="Zoom in"
             title="Zoom in (+)"
           >
@@ -95,9 +177,9 @@ export function TopToolbar() {
 
         <button
           type="button"
-          className={`toolbar-button ${hasImage && state.zoomMode === 'fit' ? 'is-active' : ''}`}
+          className={`toolbar-button ${hasImage && !isPointCloudMode && state.zoomMode === 'fit' ? 'is-active' : ''}`}
           onClick={(e) => blurAfterAction(e, fitToScreen)}
-          disabled={!hasImage}
+          disabled={zoomDisabled}
           aria-label="Fit to screen"
           title="Fit image to viewport (F or 0)"
         >
@@ -108,10 +190,12 @@ export function TopToolbar() {
         <button
           type="button"
           className={`toolbar-button ${
-            hasImage && Math.abs(state.transform.zoom - 1) < 0.0005 ? 'is-active' : ''
+            hasImage && !isPointCloudMode && Math.abs(state.transform.zoom - 1) < 0.0005
+              ? 'is-active'
+              : ''
           }`}
           onClick={(e) => blurAfterAction(e, zoomToActualSize)}
-          disabled={!hasImage}
+          disabled={zoomDisabled}
           aria-label="100% zoom"
           title="100% actual pixels (1)"
         >

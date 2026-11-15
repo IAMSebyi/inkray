@@ -561,6 +561,135 @@
   background-color: var(--border-subtle);
 }
 
+.toolbar-button-busy {
+  border-color: var(--danger-border);
+  background-color: var(--danger-bg);
+  color: var(--text-primary);
+}
+
+.toolbar-button-busy:hover:not(:disabled) {
+  border-color: var(--danger);
+  background-color: var(--danger-bg);
+}
+
+.view-mode-control {
+  flex-shrink: 0;
+}
+
+.view-mode-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 26px;
+  padding: 0 9px;
+  border: none;
+  border-right: 1px solid var(--border-subtle);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
+}
+
+.view-mode-button:last-child {
+  border-right: none;
+}
+
+.view-mode-button:hover:not(:disabled) {
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.view-mode-button.is-active {
+  background-color: var(--accent-subtle);
+  color: #cfe0ff;
+}
+
+.view-mode-button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.inspector-badge-accent {
+  border-color: var(--accent-border);
+  background-color: var(--accent-subtle);
+  color: #cfe0ff;
+}
+
+.inspector-badge-danger {
+  border-color: var(--danger-border);
+  background-color: var(--danger-bg);
+  color: var(--danger);
+}
+
+.inspector-error-note {
+  margin: 0;
+  padding: 7px 9px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--danger-border);
+  background-color: var(--danger-bg);
+  color: var(--text-primary);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+/* 3D Point Cloud Viewer */
+.pointcloud-viewer {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  background-color: var(--bg-canvas);
+}
+
+.pointcloud-canvas-host {
+  width: 100%;
+  height: 100%;
+}
+
+.pointcloud-canvas-host canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  outline: none;
+}
+
+.pointcloud-overlay-bar {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  z-index: 4;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-strong);
+  background-color: rgba(24, 26, 32, 0.9);
+}
+
+.pointcloud-stat {
+  padding: 0 4px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.point-size-readout {
+  min-width: 36px;
+  padding: 0 5px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-secondary);
+  border-left: 1px solid var(--border-subtle);
+  border-right: 1px solid var(--border-subtle);
+  line-height: 26px;
+}
+
 /* Focus accessibility */
 button:focus-visible {
   outline: 1.5px solid var(--accent);

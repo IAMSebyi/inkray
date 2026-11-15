@@ -18,17 +18,18 @@ Inkray is an open-source, geometry-aware image editor inspired by Adobe's Projec
 
 ## Current Status
 
-Inkray currently implements the client-side editor shell and 2D image viewport:
+Inkray currently implements the interactive 2D/3D viewport and monocular geometry inference backend:
 
 - **Implemented:**
-  - Frontend workspace (`React` + `TypeScript` + `Vite`) with strict TypeScript checking, ESLint, Prettier, and Vitest.
+  - Frontend workspace (`React` + `TypeScript` + `Vite` + `Three.js`) with strict TypeScript checking, ESLint, Prettier, and Vitest.
   - Dark-themed editor layout (top toolbar, left tool rail, central viewport, right inspector sidebar, bottom status bar).
   - JPEG and PNG image importing via file picker and drag-and-drop, with format/header validation, error handling, non-destructive image replacement, and access to unmodified source pixels.
   - High-DPI Canvas 2D viewport with cursor-anchored wheel/trackpad zoom, middle-mouse and `Space + left-drag` panning, Fit to Screen, 100% zoom, and resize handling.
-  - Reusable coordinate transform module (`client <-> viewport <-> image`) with unit tests.
-  - Minimal `backend/` scaffold reserved for the future Python/FastAPI service.
+  - Python + FastAPI backend integrating **MoGe-3** (`Ruicheng/moge-3-vitl`) for monocular depth, surface normals, 3D point maps, valid mask, and normalized camera intrinsics.
+  - Content-addressed disk caching of inferred geometry (`.npz` + metadata JSON) with binary array HTTP endpoints (`float32` / `uint8`) and request cancellation.
+  - Viewport visualization modes (`RGB`, `Depth`, `Normals`, `Mask`, and interactive `3D` point cloud in Three.js with `OrbitControls`), plus live cursor depth sampling.
 - **Not Yet Implemented:**
-  - MoGe-3 geometry reconstruction, Marigold IID intrinsic decomposition, SAM 2 segmentation, 3D mesh/Three.js rendering, surface brush tools, occlusion, lighting compositing, and layer editing.
+  - Marigold IID intrinsic lighting decomposition, SAM 2 surface segmentation, 3D brush projection, occlusion-aware painting, lighting-aware compositing, and paint layers.
 
 ---
 
@@ -38,8 +39,9 @@ Inkray currently implements the client-side editor shell and 2D image viewport:
 inkray/
 ├── frontend/                  # React + TypeScript + Vite editor application
 │   ├── src/
+│   │   ├── api/               # Binary HTTP client for backend geometry endpoints
 │   │   ├── components/        # UI panels, toolbars, and status bar
-│   │   ├── editor/            # Viewport component, Canvas 2D renderer, image loader, coordinate math
+│   │   ├── editor/            # 2D canvas renderer, 3D point cloud viewer, geometry previews, transforms
 │   │   ├── hooks/             # Custom React hooks (resize, shortcuts, drag-and-drop import)
 │   │   ├── state/             # Editor reducer, context provider, and cursor coordinate store
 │   │   ├── styles/            # Design tokens, global styles, and editor layout CSS
@@ -49,8 +51,17 @@ inkray/
 │   ├── tsconfig.json
 │   ├── vite.config.ts
 │   └── package.json
-├── backend/                   # Scaffold for future Python/FastAPI + PyTorch service
+├── backend/                   # Python + FastAPI + PyTorch (MoGe-3) geometry service
 │   ├── app/
+│   │   ├── api/               # FastAPI routes for inference metadata and binary arrays
+│   │   ├── cache/             # Content-addressed disk cache for inferred geometry
+│   │   ├── geometry/          # Typed geometry containers and coordinate transforms
+│   │   ├── inference/         # Model wrapper abstraction and MoGe-3 implementation
+│   │   ├── utils/             # Pillow image decoding and EXIF orientation normalization
+│   │   ├── config.py          # Environment-driven backend configuration
+│   │   └── main.py            # FastAPI app factory, CORS, and model lifespan
+│   ├── scripts/               # Standalone model + cache smoke test
+│   ├── tests/                 # Fast pytest suite for geometry math, caching, and API routes
 │   ├── pyproject.toml
 │   └── README.md
 ├── .gitignore
@@ -65,22 +76,32 @@ inkray/
 
 - **Node.js** 20+ (tested on Node 22)
 - **npm** 10+
+- **Python** 3.10+ (CUDA-capable GPU recommended for MoGe-3 inference; CPU fallback is supported)
 
-### Install Dependencies
+### Install Frontend Dependencies
 
 ```bash
 cd frontend
 npm install
 ```
 
-### Run the Development Server
+### Install and Run the Backend
+
+See [backend/README.md](backend/README.md) for full Python environment setup (PyTorch CUDA + official MoGe-3 package). Once `backend/.venv` is configured:
+
+```bash
+cd backend
+.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+### Run the Frontend Development Server
 
 ```bash
 cd frontend
 npm run dev
 ```
 
-Vite will print the local development URL (typically `http://localhost:5173`).
+Vite proxies `/api/*` requests to `http://127.0.0.1:8000` and prints the local development URL (typically `http://localhost:5173`).
 
 ---
 
