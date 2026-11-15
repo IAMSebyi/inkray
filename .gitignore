@@ -50,7 +50,9 @@ env/
 .env.*
 !.env.example
 
-# Model checkpoints & ML artifacts
+# Model checkpoints, caches, and ML artifacts
+.cache/
+backend/.cache/
 checkpoints/
 weights/
 models/
