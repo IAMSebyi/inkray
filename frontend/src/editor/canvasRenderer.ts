@@ -1,4 +1,10 @@
-import type { LoadedImage, Size2D, ViewportTransform } from '../types/editor';
+import type {
+  GeometryData,
+  LoadedImage,
+  Size2D,
+  ViewMode,
+  ViewportTransform,
+} from '../types/editor';
 import { getImageBoundsInViewport } from './viewportTransforms';
 
 let cachedCheckerPatternCanvas: HTMLCanvasElement | null = null;
@@ -32,6 +38,8 @@ export interface CanvasRenderParams {
   dpr: number;
   image: LoadedImage | null;
   transform: ViewportTransform;
+  viewMode?: Exclude<ViewMode, 'pointcloud'>;
+  geometry?: GeometryData | null;
 }
 
 export function syncCanvasBackingSize(
@@ -58,7 +66,7 @@ export function renderViewportCanvas(
   ctx: CanvasRenderingContext2D,
   params: CanvasRenderParams,
 ): void {
-  const { viewportSize, dpr, image, transform } = params;
+  const { viewportSize, dpr, image, transform, viewMode = 'rgb', geometry = null } = params;
   const safeDpr = Number.isFinite(dpr) && dpr > 0 ? dpr : 1;
   const backingSize = syncCanvasBackingSize(ctx.canvas, viewportSize, safeDpr);
 
@@ -67,6 +75,22 @@ export function renderViewportCanvas(
 
   if (!image || viewportSize.width <= 0 || viewportSize.height <= 0) {
     return;
+  }
+
+  let drawSource: HTMLImageElement | HTMLCanvasElement = image.element;
+  let showCheckerboard = image.metadata.formatLabel === 'PNG';
+
+  if (geometry) {
+    if (viewMode === 'depth') {
+      drawSource = geometry.previews.depth;
+      showCheckerboard = true;
+    } else if (viewMode === 'normals' && geometry.previews.normals) {
+      drawSource = geometry.previews.normals;
+      showCheckerboard = true;
+    } else if (viewMode === 'mask') {
+      drawSource = geometry.previews.mask;
+      showCheckerboard = false;
+    }
   }
 
   const imageSize: Size2D = {
@@ -85,8 +109,8 @@ export function renderViewportCanvas(
     return;
   }
 
-  // Screen-space checkerboard behind transparent PNGs so tiles do not scale with zoom.
-  if (image.metadata.formatLabel === 'PNG') {
+  // Screen-space checkerboard behind transparent pixels so tiles stay crisp across zoom levels.
+  if (showCheckerboard) {
     ctx.save();
     ctx.setTransform(safeDpr, 0, 0, safeDpr, 0, 0);
     const pattern = ctx.createPattern(getCheckerboardTileCanvas(), 'repeat');
@@ -115,7 +139,7 @@ export function renderViewportCanvas(
     ctx.imageSmoothingQuality = 'high';
   }
 
-  ctx.drawImage(image.element, 0, 0, image.metadata.width, image.metadata.height);
+  ctx.drawImage(drawSource, 0, 0, image.metadata.width, image.metadata.height);
   ctx.restore();
 
   ctx.save();

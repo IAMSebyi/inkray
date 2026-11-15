@@ -5,6 +5,7 @@ import { useDevicePixelRatio } from '../hooks/useDevicePixelRatio';
 import { useEditor } from '../hooks/useEditor';
 import { useElementSize } from '../hooks/useElementSize';
 import type { Size2D, ViewportTransform } from '../types/editor';
+import { PointCloudViewer } from './PointCloudViewer';
 import { renderViewportCanvas } from './canvasRenderer';
 import {
   clampPanToViewport,
@@ -62,12 +63,16 @@ export function EditorViewport({
     image: state.image,
     viewportSize: state.viewportSize,
     dpr,
+    viewMode: state.viewMode,
+    geometry: state.geometry.data,
   });
 
   latestRenderStateRef.current = {
     image: state.image,
     viewportSize: state.viewportSize,
     dpr,
+    viewMode: state.viewMode,
+    geometry: state.geometry.data,
   };
 
   useElementSize(containerRef, setViewportSize);
@@ -81,12 +86,23 @@ export function EditorViewport({
     if (!ctx) {
       return;
     }
-    const { image, viewportSize, dpr: currentDpr } = latestRenderStateRef.current;
+    const {
+      image,
+      viewportSize,
+      dpr: currentDpr,
+      viewMode,
+      geometry,
+    } = latestRenderStateRef.current;
+    if (viewMode === 'pointcloud') {
+      return;
+    }
     renderViewportCanvas(ctx, {
       viewportSize,
       dpr: currentDpr,
       image,
       transform: liveTransformRef.current,
+      viewMode,
+      geometry,
     });
   }, []);
 
@@ -112,13 +128,26 @@ export function EditorViewport({
     });
   }, [setTransform]);
 
-  // Sync external transform updates (fit, 100%, import, resize) into the live ref.
+  // Sync external transform updates (fit, 100%, import, resize, view mode) into the live ref.
   useLayoutEffect(() => {
     if (state.transform !== lastDispatchedTransformRef.current) {
       liveTransformRef.current = state.transform;
     }
+    if (state.viewMode === 'pointcloud') {
+      cursorStore.setSample(null);
+      return;
+    }
     drawCanvasNow();
-  }, [state.transform, state.image, state.viewportSize, dpr, drawCanvasNow]);
+  }, [
+    state.transform,
+    state.image,
+    state.viewportSize,
+    state.viewMode,
+    state.geometry.data,
+    dpr,
+    cursorStore,
+    drawCanvasNow,
+  ]);
 
   useEffect(() => {
     return () => {
@@ -139,9 +168,13 @@ export function EditorViewport({
     }
 
     const handleWheel = (event: WheelEvent) => {
+      const { image, viewportSize, viewMode } = latestRenderStateRef.current;
+      if (viewMode === 'pointcloud') {
+        return;
+      }
+
       event.preventDefault();
 
-      const { image, viewportSize } = latestRenderStateRef.current;
       const canvas = canvasRef.current;
       if (!image || !canvas || viewportSize.width <= 0 || viewportSize.height <= 0) {
         return;
@@ -296,13 +329,16 @@ export function EditorViewport({
     }
   };
 
-  const cursorModeClass = !state.image
-    ? 'cursor-default'
-    : isPanning
-      ? 'cursor-grabbing'
-      : isSpacePressed || state.activeTool === 'hand'
-        ? 'cursor-grab'
-        : 'cursor-default';
+  const isPointCloudMode = state.viewMode === 'pointcloud' && state.geometry.data !== null;
+
+  const cursorModeClass =
+    !state.image || isPointCloudMode
+      ? 'cursor-default'
+      : isPanning
+        ? 'cursor-grabbing'
+        : isSpacePressed || state.activeTool === 'hand'
+          ? 'cursor-grab'
+          : 'cursor-default';
 
   return (
     <main
@@ -314,6 +350,7 @@ export function EditorViewport({
       <canvas
         ref={canvasRef}
         className="viewport-canvas"
+        style={isPointCloudMode ? { display: 'none' } : undefined}
         onMouseDown={handleMouseDown}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
@@ -321,6 +358,10 @@ export function EditorViewport({
         onPointerCancel={endPanSession}
         onPointerLeave={handlePointerLeave}
       />
+
+      {isPointCloudMode && state.geometry.data && (
+        <PointCloudViewer key={state.geometry.data.metadata.id} geometry={state.geometry.data} />
+      )}
 
       {!state.image && !state.isLoading && <EmptyViewportState />}
 
