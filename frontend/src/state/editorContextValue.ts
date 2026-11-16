@@ -1,5 +1,15 @@
 import { createContext } from 'react';
-import type { EditorTool, Size2D, ViewMode, ViewportTransform, ZoomMode } from '../types/editor';
+import type { BrushEngine, BrushStroke } from '../painting/brushEngine';
+import type { BrushUiConfig } from '../painting/paintDocument';
+import type { PlanarPaintRenderer } from '../painting/planarPaintRenderer';
+import type {
+  EditorTool,
+  Point2D,
+  Size2D,
+  ViewMode,
+  ViewportTransform,
+  ZoomMode,
+} from '../types/editor';
 import type { CursorStore } from './cursorStore';
 import type { EditorState } from './editorReducer';
 
@@ -7,6 +17,8 @@ export interface EditorContextValue {
   state: EditorState;
   cursorStore: CursorStore;
   fileInputRef: React.RefObject<HTMLInputElement | null>;
+  brushEngineRef: React.RefObject<BrushEngine>;
+  paintRendererRef: React.RefObject<PlanarPaintRenderer | null>;
   openFilePicker: () => void;
   importFile: (file: File) => Promise<void>;
   clearError: () => void;
@@ -20,6 +32,21 @@ export interface EditorContextValue {
   setViewMode: (mode: ViewMode) => void;
   generateGeometry: () => Promise<void>;
   cancelGeometry: () => void;
+  selectSurfaceAtImagePoint: (imagePoint: Point2D) => Promise<void>;
+  setActiveSurface: (surfaceId: string) => void;
+  removeSurface: (surfaceId: string) => void;
+  reorderSurfaces: (fromIndex: number, toIndex: number) => void;
+  setFootprintExtent: (surfaceId: string, extentScale: number) => void;
+  setBrushConfig: (patch: Partial<BrushUiConfig>) => void;
+  setPaintOverlayOptions: (patch: {
+    showSupportOverlay?: boolean;
+    showFootprintPreview?: boolean;
+  }) => void;
+  commitBrushStroke: (stroke: BrushStroke) => void;
+  commitBrushStrokeBatch: (strokes: BrushStroke[]) => void;
+  undoPaint: () => void;
+  redoPaint: () => void;
+  exportPng: () => Promise<void>;
 }
 
 export const EditorContext = createContext<EditorContextValue | null>(null);

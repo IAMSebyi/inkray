@@ -7,6 +7,13 @@ import {
   reconcileTransformOnResize,
   zoomAtPoint,
 } from '../editor/viewportTransforms';
+import type { SurfaceSelectionResult } from '../geometry/planeFrame';
+import type { BrushStroke } from '../painting/brushEngine';
+import {
+  type BrushUiConfig,
+  PaintDocument,
+  type PaintDocumentState,
+} from '../painting/paintDocument';
 import type {
   EditorTool,
   GeometryData,
@@ -22,6 +29,7 @@ import type {
 export interface EditorState {
   image: LoadedImage | null;
   isLoading: boolean;
+  isExporting: boolean;
   error: string | null;
   transform: ViewportTransform;
   zoomMode: ZoomMode;
@@ -29,6 +37,7 @@ export interface EditorState {
   activeTool: EditorTool;
   viewMode: ViewMode;
   geometry: GeometryState;
+  paint: PaintDocumentState;
 }
 
 export type EditorAction =
@@ -46,7 +55,25 @@ export type EditorAction =
   | { type: 'GEOMETRY_START' }
   | { type: 'GEOMETRY_SUCCESS'; data: GeometryData }
   | { type: 'GEOMETRY_ERROR'; imageId: string; message: string }
-  | { type: 'GEOMETRY_CANCEL' };
+  | { type: 'GEOMETRY_CANCEL' }
+  | { type: 'PAINT_SELECT_SURFACE_START' }
+  | { type: 'PAINT_SELECT_SURFACE'; selection: SurfaceSelectionResult }
+  | { type: 'PAINT_SELECT_SURFACE_ERROR'; reason: string }
+  | { type: 'PAINT_SET_ACTIVE_SURFACE'; surfaceId: string }
+  | { type: 'PAINT_REMOVE_SURFACE'; surfaceId: string }
+  | { type: 'PAINT_REORDER_SURFACES'; fromIndex: number; toIndex: number }
+  | { type: 'PAINT_SET_FOOTPRINT_EXTENT'; surfaceId: string; extentScale: number }
+  | { type: 'PAINT_SET_BRUSH_CONFIG'; patch: Partial<BrushUiConfig> }
+  | {
+      type: 'PAINT_SET_OVERLAY_OPTIONS';
+      patch: { showSupportOverlay?: boolean; showFootprintPreview?: boolean };
+    }
+  | { type: 'PAINT_COMMIT_STROKE'; stroke: BrushStroke }
+  | { type: 'PAINT_COMMIT_STROKES'; strokes: BrushStroke[] }
+  | { type: 'PAINT_UNDO' }
+  | { type: 'PAINT_REDO' }
+  | { type: 'PAINT_EXPORT_START' }
+  | { type: 'PAINT_EXPORT_DONE'; error?: string };
 
 const IDLE_GEOMETRY: GeometryState = {
   status: 'idle',
@@ -57,6 +84,7 @@ const IDLE_GEOMETRY: GeometryState = {
 export const initialEditorState: EditorState = {
   image: null,
   isLoading: false,
+  isExporting: false,
   error: null,
   transform: IDENTITY_TRANSFORM,
   zoomMode: 'fit',
@@ -64,6 +92,7 @@ export const initialEditorState: EditorState = {
   activeTool: 'pointer',
   viewMode: 'rgb',
   geometry: IDLE_GEOMETRY,
+  paint: PaintDocument.createInitial(),
 };
 
 function getImageSize(image: LoadedImage): Size2D {
@@ -71,6 +100,13 @@ function getImageSize(image: LoadedImage): Size2D {
     width: image.metadata.width,
     height: image.metadata.height,
   };
+}
+
+function resetPaintToolOnReset(tool: EditorTool): EditorTool {
+  if (tool === 'select-surface' || tool === 'brush' || tool === 'eraser') {
+    return 'pointer';
+  }
+  return tool;
 }
 
 export function editorReducer(state: EditorState, action: EditorAction): EditorState {
@@ -92,8 +128,10 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
         error: null,
         zoomMode: 'fit',
         transform,
+        activeTool: resetPaintToolOnReset(state.activeTool),
         viewMode: 'rgb',
         geometry: IDLE_GEOMETRY,
+        paint: PaintDocument.createInitial(state.paint.brushConfig),
       };
     }
 
@@ -195,14 +233,40 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
       };
     }
 
-    case 'SET_ACTIVE_TOOL':
+    case 'SET_ACTIVE_TOOL': {
       if (state.activeTool === action.tool) {
         return state;
       }
+      if (action.tool === 'select-surface' && state.geometry.status !== 'ready') {
+        return state;
+      }
+      if (
+        (action.tool === 'brush' || action.tool === 'eraser') &&
+        (state.geometry.status !== 'ready' || state.paint.surfaces.length === 0)
+      ) {
+        return state;
+      }
+      let nextPaint = state.paint;
+      if (
+        (action.tool === 'brush' || action.tool === 'eraser') &&
+        nextPaint.activeSurfaceId === null &&
+        nextPaint.surfaces[0]
+      ) {
+        nextPaint = PaintDocument.setActiveSurface(nextPaint, nextPaint.surfaces[0].id);
+      }
+      const nextViewMode =
+        action.tool === 'brush' ||
+        action.tool === 'eraser' ||
+        (action.tool === 'select-surface' && state.viewMode === 'pointcloud')
+          ? 'rgb'
+          : state.viewMode;
       return {
         ...state,
         activeTool: action.tool,
+        viewMode: nextViewMode,
+        paint: nextPaint,
       };
+    }
 
     case 'SET_VIEW_MODE': {
       if (action.mode === 'rgb') {
@@ -221,19 +285,22 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
       };
     }
 
-    case 'GEOMETRY_START':
+    case 'GEOMETRY_START': {
       if (!state.image) {
         return state;
       }
       return {
         ...state,
+        activeTool: resetPaintToolOnReset(state.activeTool),
         viewMode: 'rgb',
         geometry: {
           status: 'loading',
           data: null,
           error: null,
         },
+        paint: PaintDocument.createInitial(state.paint.brushConfig),
       };
+    }
 
     case 'GEOMETRY_SUCCESS':
       // Ignore stale responses if the user replaced the image before completion.
@@ -262,11 +329,129 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
         },
       };
 
-    case 'GEOMETRY_CANCEL':
+    case 'GEOMETRY_CANCEL': {
       return {
         ...state,
+        activeTool: resetPaintToolOnReset(state.activeTool),
         viewMode: 'rgb',
         geometry: IDLE_GEOMETRY,
+        paint: PaintDocument.createInitial(state.paint.brushConfig),
+      };
+    }
+
+    case 'PAINT_SELECT_SURFACE_START':
+      if (state.geometry.status !== 'ready') {
+        return state;
+      }
+      return {
+        ...state,
+        paint: PaintDocument.setSelectingSurface(state.paint, true),
+      };
+
+    case 'PAINT_SELECT_SURFACE':
+      if (state.geometry.status !== 'ready') {
+        return state;
+      }
+      return {
+        ...state,
+        viewMode: state.viewMode === 'pointcloud' ? 'rgb' : state.viewMode,
+        paint: PaintDocument.selectSurface(state.paint, action.selection),
+      };
+
+    case 'PAINT_SELECT_SURFACE_ERROR':
+      return {
+        ...state,
+        paint: PaintDocument.setSelectionFailed(state.paint, action.reason),
+      };
+
+    case 'PAINT_SET_ACTIVE_SURFACE':
+      return {
+        ...state,
+        paint: PaintDocument.setActiveSurface(state.paint, action.surfaceId),
+      };
+
+    case 'PAINT_REMOVE_SURFACE': {
+      const nextPaint = PaintDocument.removeSurface(state.paint, action.surfaceId);
+      const nextTool =
+        nextPaint.surfaces.length === 0 &&
+        (state.activeTool === 'brush' || state.activeTool === 'eraser')
+          ? 'select-surface'
+          : state.activeTool;
+      return {
+        ...state,
+        activeTool: nextTool,
+        paint: nextPaint,
+      };
+    }
+
+    case 'PAINT_REORDER_SURFACES':
+      return {
+        ...state,
+        paint: PaintDocument.reorderSurfaces(state.paint, action.fromIndex, action.toIndex),
+      };
+
+    case 'PAINT_SET_FOOTPRINT_EXTENT':
+      return {
+        ...state,
+        paint: PaintDocument.setSurfaceExtent(state.paint, action.surfaceId, action.extentScale),
+      };
+
+    case 'PAINT_SET_BRUSH_CONFIG':
+      return {
+        ...state,
+        paint: PaintDocument.setBrushConfig(state.paint, action.patch),
+      };
+
+    case 'PAINT_SET_OVERLAY_OPTIONS':
+      return {
+        ...state,
+        paint: PaintDocument.setOverlayOptions(state.paint, action.patch),
+      };
+
+    case 'PAINT_COMMIT_STROKE':
+      return {
+        ...state,
+        paint: PaintDocument.commitStroke(state.paint, action.stroke),
+      };
+
+    case 'PAINT_COMMIT_STROKES':
+      return {
+        ...state,
+        paint: PaintDocument.commitStrokes(state.paint, action.strokes),
+      };
+
+    case 'PAINT_UNDO': {
+      const nextPaint = PaintDocument.undo(state.paint);
+      const nextTool =
+        nextPaint.surfaces.length === 0 &&
+        (state.activeTool === 'brush' || state.activeTool === 'eraser')
+          ? 'select-surface'
+          : state.activeTool;
+      return {
+        ...state,
+        activeTool: nextTool,
+        paint: nextPaint,
+      };
+    }
+
+    case 'PAINT_REDO':
+      return {
+        ...state,
+        paint: PaintDocument.redo(state.paint),
+      };
+
+    case 'PAINT_EXPORT_START':
+      return {
+        ...state,
+        isExporting: true,
+        error: null,
+      };
+
+    case 'PAINT_EXPORT_DONE':
+      return {
+        ...state,
+        isExporting: false,
+        error: action.error ?? state.error,
       };
   }
 }

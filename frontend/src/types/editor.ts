@@ -54,7 +54,7 @@ export interface ImageCoordinateSample {
   inBounds: boolean;
 }
 
-export type EditorTool = 'pointer' | 'hand';
+export type EditorTool = 'pointer' | 'hand' | 'select-surface' | 'brush' | 'eraser';
 
 export type ZoomMode = 'fit' | 'custom';
 

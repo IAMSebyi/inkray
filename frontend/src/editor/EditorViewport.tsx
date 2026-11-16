@@ -1,14 +1,20 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { EmptyViewportState } from '../components/EmptyViewportState';
 import { ErrorBanner } from '../components/ErrorBanner';
+import { parseNormalizedIntrinsics } from '../geometry/geometryAccess';
 import { useDevicePixelRatio } from '../hooks/useDevicePixelRatio';
 import { useEditor } from '../hooks/useEditor';
 import { useElementSize } from '../hooks/useElementSize';
-import type { Size2D, ViewportTransform } from '../types/editor';
+import { PaintDocument } from '../painting/paintDocument';
+import { getEffectiveFootprint } from '../painting/planarDecal';
+import { findSurfaceOwnerAtImagePoint } from '../painting/planeVisibility';
+import { PlanarPaintRenderer } from '../painting/planarPaintRenderer';
+import type { Point2D, Size2D, ViewportTransform } from '../types/editor';
 import { PointCloudViewer } from './PointCloudViewer';
-import { renderViewportCanvas } from './canvasRenderer';
+import { buildBrushCursorPreview, renderViewportCanvas } from './canvasRenderer';
 import {
   clampPanToViewport,
+  clientToImage,
   clientToViewport,
   computeWheelZoomTarget,
   getEffectiveZoomBounds,
@@ -35,21 +41,39 @@ interface PanSession {
   lastClientY: number;
 }
 
+interface PaintSession {
+  active: boolean;
+  pointerId: number | null;
+  surfaceId: string | null;
+  lastImagePoint: Point2D | null;
+}
+
 export function EditorViewport({
   isSpacePressed,
   isDragActive,
   dropZoneProps,
 }: EditorViewportProps) {
-  const { state, cursorStore, setViewportSize, setTransform } = useEditor();
+  const {
+    state,
+    cursorStore,
+    brushEngineRef,
+    paintRendererRef,
+    setViewportSize,
+    setTransform,
+    selectSurfaceAtImagePoint,
+    commitBrushStrokeBatch,
+  } = useEditor();
   const dpr = useDevicePixelRatio();
 
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const paintHostRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const [isPanning, setIsPanning] = useState(false);
 
   const liveTransformRef = useRef<ViewportTransform>(state.transform);
   const lastDispatchedTransformRef = useRef<ViewportTransform | null>(null);
+  const cursorViewportPointRef = useRef<Point2D | null>(null);
   const renderRafRef = useRef<number | null>(null);
   const syncRafRef = useRef<number | null>(null);
   const panSessionRef = useRef<PanSession>({
@@ -58,13 +82,22 @@ export function EditorViewport({
     lastClientX: 0,
     lastClientY: 0,
   });
+  const paintSessionRef = useRef<PaintSession>({
+    active: false,
+    pointerId: null,
+    surfaceId: null,
+    lastImagePoint: null,
+  });
 
   const latestRenderStateRef = useRef({
     image: state.image,
     viewportSize: state.viewportSize,
     dpr,
     viewMode: state.viewMode,
+    activeTool: state.activeTool,
     geometry: state.geometry.data,
+    paint: state.paint,
+    isPanning,
   });
 
   latestRenderStateRef.current = {
@@ -72,7 +105,10 @@ export function EditorViewport({
     viewportSize: state.viewportSize,
     dpr,
     viewMode: state.viewMode,
+    activeTool: state.activeTool,
     geometry: state.geometry.data,
+    paint: state.paint,
+    isPanning,
   };
 
   useElementSize(containerRef, setViewportSize);
@@ -91,11 +127,48 @@ export function EditorViewport({
       viewportSize,
       dpr: currentDpr,
       viewMode,
+      activeTool,
       geometry,
+      paint,
+      isPanning: currentIsPanning,
     } = latestRenderStateRef.current;
     if (viewMode === 'pointcloud') {
       return;
     }
+
+    const paintRenderer = paintRendererRef.current;
+    const usePaintWebGl =
+      viewMode === 'rgb' && image !== null && geometry !== null && paintRenderer !== null;
+
+    if (viewMode === 'rgb' && image !== null && geometry !== null && paintRenderer !== null) {
+      paintRenderer.renderViewport({
+        viewportSize,
+        dpr: currentDpr,
+        image,
+        transform: liveTransformRef.current,
+        geometry,
+        paintDoc: paint,
+        pendingStrokes: brushEngineRef.current.getPreviewStrokes(),
+        activeStroke: brushEngineRef.current.getActiveStroke(),
+      });
+    }
+
+    const brushCursor =
+      image &&
+      viewMode === 'rgb' &&
+      !currentIsPanning &&
+      !isSpacePressed &&
+      cursorViewportPointRef.current
+        ? buildBrushCursorPreview({
+            tool: activeTool,
+            viewportPoint: cursorViewportPointRef.current,
+            imageSize: { width: image.metadata.width, height: image.metadata.height },
+            transform: liveTransformRef.current,
+            geometry,
+            paintDoc: paint,
+          })
+        : null;
+
     renderViewportCanvas(ctx, {
       viewportSize,
       dpr: currentDpr,
@@ -103,8 +176,24 @@ export function EditorViewport({
       transform: liveTransformRef.current,
       viewMode,
       geometry,
+      borderOnly: usePaintWebGl,
+      brushCursor,
     });
-  }, []);
+  }, [brushEngineRef, isSpacePressed, paintRendererRef]);
+
+  useEffect(() => {
+    const host = paintHostRef.current;
+    if (!host) {
+      return;
+    }
+    const renderer = new PlanarPaintRenderer(host);
+    paintRendererRef.current = renderer;
+    drawCanvasNow();
+    return () => {
+      renderer.dispose();
+      paintRendererRef.current = null;
+    };
+  }, [drawCanvasNow, paintRendererRef]);
 
   const scheduleCanvasRender = useCallback(() => {
     if (renderRafRef.current !== null) {
@@ -128,7 +217,7 @@ export function EditorViewport({
     });
   }, [setTransform]);
 
-  // Sync external transform updates (fit, 100%, import, resize, view mode) into the live ref.
+  // Sync external transform updates (fit, 100%, import, resize, view mode, paint) into the live ref.
   useLayoutEffect(() => {
     if (state.transform !== lastDispatchedTransformRef.current) {
       liveTransformRef.current = state.transform;
@@ -143,7 +232,12 @@ export function EditorViewport({
     state.image,
     state.viewportSize,
     state.viewMode,
+    state.activeTool,
     state.geometry.data,
+    state.paint,
+    state.isExporting,
+    isSpacePressed,
+    isPanning,
     dpr,
     cursorStore,
     drawCanvasNow,
@@ -199,6 +293,7 @@ export function EditorViewport({
       const nextTransform = zoomAtPoint(liveTransformRef.current, anchor, targetZoom, bounds);
 
       liveTransformRef.current = nextTransform;
+      cursorViewportPointRef.current = anchor;
       scheduleCanvasRender();
       scheduleTransformSync();
 
@@ -256,25 +351,110 @@ export function EditorViewport({
     const isMiddleClick = event.button === 1;
     const isLeftPanClick = event.button === 0 && (isSpacePressed || state.activeTool === 'hand');
 
-    if (!isMiddleClick && !isLeftPanClick) {
+    if (isMiddleClick || isLeftPanClick) {
+      if (paintSessionRef.current.active) {
+        brushEngineRef.current.cancelStroke();
+        paintSessionRef.current = {
+          active: false,
+          pointerId: null,
+          surfaceId: null,
+          lastImagePoint: null,
+        };
+        scheduleCanvasRender();
+      }
+      event.preventDefault();
+      event.currentTarget.setPointerCapture(event.pointerId);
+
+      panSessionRef.current = {
+        active: true,
+        pointerId: event.pointerId,
+        lastClientX: event.clientX,
+        lastClientY: event.clientY,
+      };
+      setIsPanning(true);
       return;
     }
 
-    event.preventDefault();
-    event.currentTarget.setPointerCapture(event.pointerId);
+    if (event.button !== 0 || state.viewMode === 'pointcloud' || !state.geometry.data) {
+      return;
+    }
 
-    panSessionRef.current = {
-      active: true,
-      pointerId: event.pointerId,
-      lastClientX: event.clientX,
-      lastClientY: event.clientY,
+    const rect = event.currentTarget.getBoundingClientRect();
+    cursorViewportPointRef.current = {
+      x: event.clientX - rect.left,
+      y: event.clientY - rect.top,
     };
-    setIsPanning(true);
+    const imagePoint = clientToImage(
+      { x: event.clientX, y: event.clientY },
+      rect,
+      liveTransformRef.current,
+    );
+
+    if (state.activeTool === 'select-surface') {
+      event.preventDefault();
+      void selectSurfaceAtImagePoint(imagePoint);
+      return;
+    }
+
+    if (
+      (state.activeTool === 'brush' || state.activeTool === 'eraser') &&
+      state.viewMode === 'rgb'
+    ) {
+      const imageSize = {
+        width: state.image.metadata.width,
+        height: state.image.metadata.height,
+      };
+      const ownerSurface = findSurfaceOwnerAtImagePoint(
+        state.paint.surfaces,
+        imagePoint,
+        imageSize,
+        state.geometry.data,
+      );
+      const targetSurface = ownerSurface ?? PaintDocument.getActiveSurface(state.paint);
+      if (!targetSurface) {
+        return;
+      }
+
+      const intr = parseNormalizedIntrinsics(state.geometry.data.metadata.intrinsics);
+      const hit = targetSurface.frame.imagePointToPlane(imagePoint, imageSize, intr);
+      if (!hit) {
+        return;
+      }
+
+      const brush = PaintDocument.getEffectiveBrushSettingsForSurface(state.paint, targetSurface);
+      const footprint = getEffectiveFootprint(targetSurface);
+      const strokeMode = state.activeTool === 'eraser' ? 'erase' : 'paint';
+      const started = brushEngineRef.current.beginStroke(
+        targetSurface.id,
+        footprint,
+        brush,
+        { u: hit.u, v: hit.v },
+        strokeMode,
+      );
+      if (!started) {
+        return;
+      }
+
+      event.preventDefault();
+      event.currentTarget.setPointerCapture(event.pointerId);
+      paintSessionRef.current = {
+        active: true,
+        pointerId: event.pointerId,
+        surfaceId: targetSurface.id,
+        lastImagePoint: imagePoint,
+      };
+      scheduleCanvasRender();
+    }
   };
 
   const handlePointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
-    const panSession = panSessionRef.current;
+    const rect = event.currentTarget.getBoundingClientRect();
+    cursorViewportPointRef.current = {
+      x: event.clientX - rect.left,
+      y: event.clientY - rect.top,
+    };
 
+    const panSession = panSessionRef.current;
     if (panSession.active && panSession.pointerId === event.pointerId) {
       const { image, viewportSize } = latestRenderStateRef.current;
       if (!image) {
@@ -299,37 +479,163 @@ export function EditorViewport({
       liveTransformRef.current = nextTransform;
       scheduleCanvasRender();
       scheduleTransformSync();
+      updateCursorSample(event.clientX, event.clientY);
+      return;
+    }
+
+    const paintSession = paintSessionRef.current;
+    if (paintSession.active && paintSession.pointerId === event.pointerId) {
+      const { image, geometry, paint } = latestRenderStateRef.current;
+      if (image && geometry && paint.surfaces.length > 0) {
+        const imageSize = {
+          width: image.metadata.width,
+          height: image.metadata.height,
+        };
+        const imagePoint = clientToImage(
+          { x: event.clientX, y: event.clientY },
+          rect,
+          liveTransformRef.current,
+        );
+        const intr = parseNormalizedIntrinsics(geometry.metadata.intrinsics);
+        const ownerSurface = findSurfaceOwnerAtImagePoint(
+          paint.surfaces,
+          imagePoint,
+          imageSize,
+          geometry,
+        );
+        const prevSurface = paintSession.surfaceId
+          ? (paint.surfaces.find((s) => s.id === paintSession.surfaceId) ?? null)
+          : null;
+
+        if (ownerSurface && ownerSurface.id !== paintSession.surfaceId) {
+          // Refine seam crossing along the pointer segment so cross-surface strokes connect cleanly.
+          const prevImg = paintSession.lastImagePoint ?? imagePoint;
+          let loImg = prevImg;
+          let hiImg = imagePoint;
+          for (let step = 0; step < 6; step++) {
+            const midImg = { x: 0.5 * (loImg.x + hiImg.x), y: 0.5 * (loImg.y + hiImg.y) };
+            const midOwner = findSurfaceOwnerAtImagePoint(
+              paint.surfaces,
+              midImg,
+              imageSize,
+              geometry,
+            );
+            if (midOwner?.id === ownerSurface.id) {
+              hiImg = midImg;
+            } else {
+              loImg = midImg;
+            }
+          }
+
+          const prevEndHit = prevSurface
+            ? prevSurface.frame.imagePointToPlane(loImg, imageSize, intr)
+            : null;
+          const nextStartHit = ownerSurface.frame.imagePointToPlane(hiImg, imageSize, intr);
+          const nextCurrHit = ownerSurface.frame.imagePointToPlane(imagePoint, imageSize, intr);
+          const nextStart = nextStartHit ?? nextCurrHit;
+
+          if (nextStart) {
+            const nextBrush = PaintDocument.getEffectiveBrushSettingsForSurface(
+              paint,
+              ownerSurface,
+            );
+            const nextFootprint = getEffectiveFootprint(ownerSurface);
+            const switched = brushEngineRef.current.switchSurfaceStroke(
+              ownerSurface.id,
+              nextFootprint,
+              nextBrush,
+              { u: nextStart.u, v: nextStart.v },
+              prevEndHit ? { u: prevEndHit.u, v: prevEndHit.v } : null,
+            );
+            if (switched) {
+              if (nextCurrHit && nextCurrHit !== nextStart) {
+                brushEngineRef.current.extendStroke({ u: nextCurrHit.u, v: nextCurrHit.v }, true);
+              }
+              paintSession.surfaceId = ownerSurface.id;
+            }
+          }
+        } else if (prevSurface) {
+          const hit = prevSurface.frame.imagePointToPlane(imagePoint, imageSize, intr);
+          if (hit) {
+            brushEngineRef.current.extendStroke({ u: hit.u, v: hit.v });
+          }
+        }
+
+        paintSession.lastImagePoint = imagePoint;
+        scheduleCanvasRender();
+      }
+    } else {
+      const { activeTool, viewMode } = latestRenderStateRef.current;
+      if (viewMode === 'rgb' && (activeTool === 'brush' || activeTool === 'eraser')) {
+        scheduleCanvasRender();
+      }
     }
 
     updateCursorSample(event.clientX, event.clientY);
   };
 
-  const endPanSession = (event: React.PointerEvent<HTMLCanvasElement>) => {
+  const endPointerSession = (event: React.PointerEvent<HTMLCanvasElement>, cancelled: boolean) => {
     const panSession = panSessionRef.current;
-    if (!panSession.active || panSession.pointerId !== event.pointerId) {
-      return;
+    if (panSession.active && panSession.pointerId === event.pointerId) {
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+      panSessionRef.current = {
+        active: false,
+        pointerId: null,
+        lastClientX: 0,
+        lastClientY: 0,
+      };
+      setIsPanning(false);
     }
 
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
+    const paintSession = paintSessionRef.current;
+    if (paintSession.active && paintSession.pointerId === event.pointerId) {
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+      paintSessionRef.current = {
+        active: false,
+        pointerId: null,
+        surfaceId: null,
+        lastImagePoint: null,
+      };
+      if (cancelled) {
+        brushEngineRef.current.cancelStroke();
+        scheduleCanvasRender();
+      } else {
+        const batch = brushEngineRef.current.commitBatch();
+        if (batch.length > 0) {
+          commitBrushStrokeBatch(batch);
+        } else {
+          scheduleCanvasRender();
+        }
+      }
     }
+  };
 
-    panSessionRef.current = {
-      active: false,
-      pointerId: null,
-      lastClientX: 0,
-      lastClientY: 0,
-    };
-    setIsPanning(false);
+  const handlePointerUp = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    endPointerSession(event, false);
+  };
+
+  const handlePointerCancel = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    endPointerSession(event, true);
   };
 
   const handlePointerLeave = () => {
-    if (!panSessionRef.current.active) {
+    cursorViewportPointRef.current = null;
+    if (!panSessionRef.current.active && !paintSessionRef.current.active) {
       cursorStore.setSample(null);
+      scheduleCanvasRender();
     }
   };
 
   const isPointCloudMode = state.viewMode === 'pointcloud' && state.geometry.data !== null;
+  const isPaintWebGlVisible =
+    !isPointCloudMode &&
+    state.viewMode === 'rgb' &&
+    state.image !== null &&
+    state.geometry.data !== null;
 
   const cursorModeClass =
     !state.image || isPointCloudMode
@@ -338,7 +644,13 @@ export function EditorViewport({
         ? 'cursor-grabbing'
         : isSpacePressed || state.activeTool === 'hand'
           ? 'cursor-grab'
-          : 'cursor-default';
+          : (state.activeTool === 'brush' || state.activeTool === 'eraser') &&
+              state.viewMode === 'rgb' &&
+              state.paint.surfaces.length > 0
+            ? 'cursor-brush'
+            : state.activeTool === 'select-surface'
+              ? 'cursor-crosshair'
+              : 'cursor-default';
 
   return (
     <main
@@ -347,6 +659,12 @@ export function EditorViewport({
       aria-label="Image editor viewport"
       {...dropZoneProps}
     >
+      <div
+        ref={paintHostRef}
+        className="paint-webgl-host"
+        style={isPaintWebGlVisible ? undefined : { display: 'none' }}
+      />
+
       <canvas
         ref={canvasRef}
         className="viewport-canvas"
@@ -354,8 +672,8 @@ export function EditorViewport({
         onMouseDown={handleMouseDown}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
-        onPointerUp={endPanSession}
-        onPointerCancel={endPanSession}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerCancel}
         onPointerLeave={handlePointerLeave}
       />
 

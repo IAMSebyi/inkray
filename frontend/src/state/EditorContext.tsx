@@ -1,9 +1,13 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, type ReactNode } from 'react';
-import { fetchGeometryForImage } from '../api/geometryClient';
+import { fetchGeometryForImage, selectSurfaceForGeometry } from '../api/geometryClient';
 import { ImageLoadError, loadImageFromFile } from '../editor/imageLoader';
+import { BrushEngine, type BrushStroke } from '../painting/brushEngine';
+import type { BrushUiConfig } from '../painting/paintDocument';
+import type { PlanarPaintRenderer } from '../painting/planarPaintRenderer';
 import type {
   EditorTool,
   LoadedImage,
+  Point2D,
   Size2D,
   ViewMode,
   ViewportTransform,
@@ -12,6 +16,27 @@ import type {
 import { createCursorStore, type CursorStore } from './cursorStore';
 import { EditorContext, type EditorContextValue } from './editorContextValue';
 import { editorReducer, initialEditorState } from './editorReducer';
+
+interface SaveFileWritable {
+  write: (data: Blob) => Promise<void>;
+  close: () => Promise<void>;
+}
+
+interface SaveFileHandle {
+  createWritable: () => Promise<SaveFileWritable>;
+}
+
+interface SaveFilePickerWindow extends Window {
+  showSaveFilePicker?: (options?: {
+    suggestedName?: string;
+    types?: Array<{ description?: string; accept: Record<string, string[]> }>;
+  }) => Promise<SaveFileHandle>;
+}
+
+function buildExportFilename(sourceName: string): string {
+  const stem = sourceName.replace(/\.[^/.]+$/, '').trim() || 'image';
+  return `${stem}-inkray.png`;
+}
 
 export function EditorProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(editorReducer, initialEditorState);
@@ -22,10 +47,16 @@ export function EditorProvider({ children }: { children: ReactNode }) {
   }
   const cursorStore = cursorStoreRef.current;
 
+  const brushEngineRef = useRef<BrushEngine>(new BrushEngine());
+  const paintRendererRef = useRef<PlanarPaintRenderer | null>(null);
+
   const activeAbortRef = useRef<AbortController | null>(null);
   const geometryAbortRef = useRef<AbortController | null>(null);
+  const surfaceSelectAbortRef = useRef<AbortController | null>(null);
   const geometryInFlightRef = useRef(false);
   const activeImageRef = useRef<LoadedImage | null>(null);
+  const stateRef = useRef(state);
+  stateRef.current = state;
 
   useEffect(() => {
     activeImageRef.current = state.image;
@@ -35,6 +66,7 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     return () => {
       activeAbortRef.current?.abort();
       geometryAbortRef.current?.abort();
+      surfaceSelectAbortRef.current?.abort();
       activeImageRef.current?.dispose();
     };
   }, []);
@@ -61,9 +93,12 @@ export function EditorProvider({ children }: { children: ReactNode }) {
         geometryAbortRef.current?.abort();
         geometryAbortRef.current = null;
         geometryInFlightRef.current = false;
+        surfaceSelectAbortRef.current?.abort();
+        surfaceSelectAbortRef.current = null;
 
         const previousImage = activeImageRef.current;
         activeImageRef.current = nextImage;
+        brushEngineRef.current.cancelStroke();
         dispatch({ type: 'IMPORT_SUCCESS', image: nextImage });
         cursorStore.setSample(null);
 
@@ -97,8 +132,11 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     }
 
     geometryInFlightRef.current = true;
+    surfaceSelectAbortRef.current?.abort();
+    surfaceSelectAbortRef.current = null;
     const abortController = new AbortController();
     geometryAbortRef.current = abortController;
+    brushEngineRef.current.cancelStroke();
     dispatch({ type: 'GEOMETRY_START' });
 
     try {
@@ -129,7 +167,181 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     geometryAbortRef.current?.abort();
     geometryAbortRef.current = null;
     geometryInFlightRef.current = false;
+    surfaceSelectAbortRef.current?.abort();
+    surfaceSelectAbortRef.current = null;
+    brushEngineRef.current.cancelStroke();
     dispatch({ type: 'GEOMETRY_CANCEL' });
+  }, []);
+
+  const selectSurfaceAtImagePoint = useCallback(async (imagePoint: Point2D) => {
+    const current = stateRef.current;
+    const targetImage = current.image;
+    const targetGeometry = current.geometry.data;
+    if (!targetImage || !targetGeometry || current.geometry.status !== 'ready') {
+      return;
+    }
+
+    surfaceSelectAbortRef.current?.abort();
+    const abortController = new AbortController();
+    surfaceSelectAbortRef.current = abortController;
+
+    brushEngineRef.current.cancelStroke();
+    dispatch({ type: 'PAINT_SELECT_SURFACE_START' });
+
+    try {
+      const outcome = await selectSurfaceForGeometry(
+        targetGeometry.metadata.id,
+        imagePoint,
+        abortController.signal,
+      );
+      if (
+        abortController.signal.aborted ||
+        activeImageRef.current?.id !== targetImage.id ||
+        stateRef.current.geometry.data?.metadata.id !== targetGeometry.metadata.id
+      ) {
+        return;
+      }
+
+      if (outcome.ok) {
+        dispatch({ type: 'PAINT_SELECT_SURFACE', selection: outcome.selection });
+      } else {
+        dispatch({ type: 'PAINT_SELECT_SURFACE_ERROR', reason: outcome.reason });
+      }
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        return;
+      }
+      if (
+        abortController.signal.aborted ||
+        activeImageRef.current?.id !== targetImage.id ||
+        stateRef.current.geometry.data?.metadata.id !== targetGeometry.metadata.id
+      ) {
+        return;
+      }
+      const reason =
+        error instanceof Error ? error.message : 'Failed to select planar surface on backend.';
+      dispatch({ type: 'PAINT_SELECT_SURFACE_ERROR', reason });
+    } finally {
+      if (surfaceSelectAbortRef.current === abortController) {
+        surfaceSelectAbortRef.current = null;
+      }
+    }
+  }, []);
+
+  const setActiveSurface = useCallback((surfaceId: string) => {
+    brushEngineRef.current.cancelStroke();
+    dispatch({ type: 'PAINT_SET_ACTIVE_SURFACE', surfaceId });
+  }, []);
+
+  const removeSurface = useCallback((surfaceId: string) => {
+    brushEngineRef.current.cancelStroke();
+    dispatch({ type: 'PAINT_REMOVE_SURFACE', surfaceId });
+  }, []);
+
+  const reorderSurfaces = useCallback((fromIndex: number, toIndex: number) => {
+    brushEngineRef.current.cancelStroke();
+    dispatch({ type: 'PAINT_REORDER_SURFACES', fromIndex, toIndex });
+  }, []);
+
+  const setFootprintExtent = useCallback((surfaceId: string, extentScale: number) => {
+    dispatch({ type: 'PAINT_SET_FOOTPRINT_EXTENT', surfaceId, extentScale });
+  }, []);
+
+  const setBrushConfig = useCallback((patch: Partial<BrushUiConfig>) => {
+    dispatch({ type: 'PAINT_SET_BRUSH_CONFIG', patch });
+  }, []);
+
+  const setPaintOverlayOptions = useCallback(
+    (patch: { showSupportOverlay?: boolean; showFootprintPreview?: boolean }) => {
+      dispatch({ type: 'PAINT_SET_OVERLAY_OPTIONS', patch });
+    },
+    [],
+  );
+
+  const commitBrushStroke = useCallback((stroke: BrushStroke) => {
+    dispatch({ type: 'PAINT_COMMIT_STROKE', stroke });
+  }, []);
+
+  const commitBrushStrokeBatch = useCallback((strokes: BrushStroke[]) => {
+    dispatch({ type: 'PAINT_COMMIT_STROKES', strokes });
+  }, []);
+
+  const undoPaint = useCallback(() => {
+    brushEngineRef.current.cancelStroke();
+    dispatch({ type: 'PAINT_UNDO' });
+  }, []);
+
+  const redoPaint = useCallback(() => {
+    brushEngineRef.current.cancelStroke();
+    dispatch({ type: 'PAINT_REDO' });
+  }, []);
+
+  const exportPng = useCallback(async () => {
+    const current = stateRef.current;
+    const image = current.image;
+    const geometry = current.geometry.data;
+    const renderer = paintRendererRef.current;
+
+    if (!image || !geometry || !renderer) {
+      dispatch({
+        type: 'PAINT_EXPORT_DONE',
+        error: 'Load an image and generate geometry before exporting.',
+      });
+      return;
+    }
+
+    const suggestedName = buildExportFilename(image.metadata.name);
+    const picker = (window as SaveFilePickerWindow).showSaveFilePicker;
+    let fileHandle: SaveFileHandle | null = null;
+
+    if (picker) {
+      try {
+        fileHandle = await picker({
+          suggestedName,
+          types: [{ description: 'PNG Image', accept: { 'image/png': ['.png'] } }],
+        });
+      } catch (error) {
+        if (error instanceof DOMException && error.name === 'AbortError') {
+          return;
+        }
+        const message = error instanceof Error ? error.message : 'Failed to open save file dialog.';
+        dispatch({ type: 'PAINT_EXPORT_DONE', error: message });
+        return;
+      }
+    }
+
+    dispatch({ type: 'PAINT_EXPORT_START' });
+    try {
+      const latest = stateRef.current;
+      const exportImage = latest.image ?? image;
+      const exportGeometry = latest.geometry.data ?? geometry;
+      const blob = await renderer.exportPngBlob({
+        image: exportImage,
+        geometry: exportGeometry,
+        paintDoc: latest.paint,
+      });
+
+      if (fileHandle) {
+        const writable = await fileHandle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+      } else {
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = suggestedName;
+        document.body.appendChild(anchor);
+        anchor.click();
+        document.body.removeChild(anchor);
+        window.setTimeout(() => {
+          URL.revokeObjectURL(url);
+        }, 1000);
+      }
+      dispatch({ type: 'PAINT_EXPORT_DONE' });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to export PNG image.';
+      dispatch({ type: 'PAINT_EXPORT_DONE', error: message });
+    }
   }, []);
 
   const clearError = useCallback(() => {
@@ -161,10 +373,16 @@ export function EditorProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const setActiveTool = useCallback((tool: EditorTool) => {
+    if (tool !== 'brush' && tool !== 'eraser') {
+      brushEngineRef.current.cancelStroke();
+    }
     dispatch({ type: 'SET_ACTIVE_TOOL', tool });
   }, []);
 
   const setViewMode = useCallback((mode: ViewMode) => {
+    if (mode !== 'rgb') {
+      brushEngineRef.current.cancelStroke();
+    }
     dispatch({ type: 'SET_VIEW_MODE', mode });
   }, []);
 
@@ -173,6 +391,8 @@ export function EditorProvider({ children }: { children: ReactNode }) {
       state,
       cursorStore,
       fileInputRef,
+      brushEngineRef,
+      paintRendererRef,
       openFilePicker,
       importFile,
       clearError,
@@ -186,6 +406,18 @@ export function EditorProvider({ children }: { children: ReactNode }) {
       setViewMode,
       generateGeometry,
       cancelGeometry,
+      selectSurfaceAtImagePoint,
+      setActiveSurface,
+      removeSurface,
+      reorderSurfaces,
+      setFootprintExtent,
+      setBrushConfig,
+      setPaintOverlayOptions,
+      commitBrushStroke,
+      commitBrushStrokeBatch,
+      undoPaint,
+      redoPaint,
+      exportPng,
     }),
     [
       state,
@@ -203,6 +435,18 @@ export function EditorProvider({ children }: { children: ReactNode }) {
       setViewMode,
       generateGeometry,
       cancelGeometry,
+      selectSurfaceAtImagePoint,
+      setActiveSurface,
+      removeSurface,
+      reorderSurfaces,
+      setFootprintExtent,
+      setBrushConfig,
+      setPaintOverlayOptions,
+      commitBrushStroke,
+      commitBrushStrokeBatch,
+      undoPaint,
+      redoPaint,
+      exportPng,
     ],
   );
 

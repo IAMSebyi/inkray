@@ -1,4 +1,9 @@
 import { describe, expect, it } from 'vitest';
+import {
+  buildSyntheticSurfaceSelection,
+  createSyntheticPlanarScene,
+} from '../geometry/testFixtures';
+import type { BrushStroke } from '../painting/brushEngine';
 import type { GeometryData, LoadedImage } from '../types/editor';
 import { editorReducer, initialEditorState } from './editorReducer';
 
@@ -175,5 +180,93 @@ describe('editorReducer', () => {
 
     state = editorReducer(state, { type: 'SET_VIEW_MODE', mode: 'rgb' });
     expect(state.viewMode).toBe('rgb');
+  });
+
+  it('gates surface/brush tools cleanly, tracks paint undo/redo/export, and resets on image replacement', () => {
+    const img1 = createStubImage('wall-1', 24, 24);
+    const geom1 = createStubGeometry('wall-1');
+    const scene = createSyntheticPlanarScene({
+      width: 24,
+      height: 24,
+      planeOrigin: [0, 0, 3.0],
+      planeNormal: [0, 0, -1],
+    });
+    const selection1 = buildSyntheticSurfaceSelection(scene, 10, 12);
+    const selection2 = buildSyntheticSurfaceSelection(scene, 14, 12);
+
+    // Painting tools stay disabled before geometry is ready.
+    let state = editorReducer(initialEditorState, { type: 'IMPORT_SUCCESS', image: img1 });
+    state = editorReducer(state, { type: 'SET_ACTIVE_TOOL', tool: 'select-surface' });
+    expect(state.activeTool).toBe('pointer');
+
+    state = editorReducer(state, { type: 'GEOMETRY_START' });
+    state = editorReducer(state, { type: 'GEOMETRY_SUCCESS', data: geom1 });
+
+    // Brush and eraser stay disabled until at least one planar surface is selected.
+    state = editorReducer(state, { type: 'SET_ACTIVE_TOOL', tool: 'brush' });
+    expect(state.activeTool).toBe('pointer');
+    state = editorReducer(state, { type: 'SET_ACTIVE_TOOL', tool: 'eraser' });
+    expect(state.activeTool).toBe('pointer');
+
+    // Selecting surfaces keeps select-surface tool active for multi-surface picking.
+    state = editorReducer(state, { type: 'SET_ACTIVE_TOOL', tool: 'select-surface' });
+    state = editorReducer(state, { type: 'PAINT_SELECT_SURFACE_START' });
+    expect(state.paint.isSelectingSurface).toBe(true);
+
+    state = editorReducer(state, { type: 'PAINT_SELECT_SURFACE', selection: selection1 });
+    expect(state.paint.isSelectingSurface).toBe(false);
+    expect(state.activeTool).toBe('select-surface');
+    state = editorReducer(state, { type: 'PAINT_SELECT_SURFACE', selection: selection2 });
+    expect(state.paint.surfaces.length).toBe(2);
+    expect(state.activeTool).toBe('select-surface');
+
+    const surface1Id = state.paint.surfaces[0]?.id;
+    const surface2Id = state.paint.surfaces[1]?.id;
+    if (!surface1Id || !surface2Id) {
+      throw new Error('Expected two selected surfaces');
+    }
+
+    // Manual switch to brush/eraser transitions viewMode to rgb.
+    state = editorReducer(state, { type: 'SET_VIEW_MODE', mode: 'depth' });
+    state = editorReducer(state, { type: 'SET_ACTIVE_TOOL', tool: 'brush' });
+    expect(state.activeTool).toBe('brush');
+    expect(state.viewMode).toBe('rgb');
+    state = editorReducer(state, { type: 'SET_ACTIVE_TOOL', tool: 'eraser' });
+    expect(state.activeTool).toBe('eraser');
+
+    // Commit multi-surface stroke batch + priority reorder + undo/redo + export state flags.
+    const stroke: BrushStroke = {
+      id: 'test-stroke-1',
+      surfaceId: surface1Id,
+      mode: 'paint',
+      brush: { diameter: 0.2, color: '#ff4d4d', opacity: 0.9, hardness: 0.8 },
+      points: [{ u: 0, v: 0 }],
+    };
+    state = editorReducer(state, { type: 'PAINT_COMMIT_STROKES', strokes: [stroke] });
+    expect(state.paint.strokes.length).toBe(1);
+
+    state = editorReducer(state, { type: 'PAINT_REORDER_SURFACES', fromIndex: 1, toIndex: 0 });
+    expect(state.paint.surfaces[0]?.id).toBe(surface2Id);
+
+    state = editorReducer(state, { type: 'PAINT_UNDO' });
+    expect(state.paint.surfaces[0]?.id).toBe(surface1Id);
+    state = editorReducer(state, { type: 'PAINT_UNDO' });
+    expect(state.paint.strokes.length).toBe(0);
+
+    state = editorReducer(state, { type: 'PAINT_REDO' });
+    expect(state.paint.strokes.length).toBe(1);
+
+    state = editorReducer(state, { type: 'PAINT_EXPORT_START' });
+    expect(state.isExporting).toBe(true);
+    state = editorReducer(state, { type: 'PAINT_EXPORT_DONE', error: 'Export failed' });
+    expect(state.isExporting).toBe(false);
+    expect(state.error).toBe('Export failed');
+
+    // Replacing image clears paint document and resets tool cleanly.
+    const img2 = createStubImage('wall-2', 24, 24);
+    state = editorReducer(state, { type: 'IMPORT_SUCCESS', image: img2 });
+    expect(state.paint.surfaces.length).toBe(0);
+    expect(state.paint.activeSurfaceId).toBeNull();
+    expect(state.activeTool).toBe('pointer');
   });
 });

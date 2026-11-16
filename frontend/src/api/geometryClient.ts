@@ -1,10 +1,12 @@
-import type { GeometryData, GeometryMetadata, LoadedImage } from '../types/editor';
+import type { GeometryData, GeometryMetadata, LoadedImage, Point2D } from '../types/editor';
 import {
   createDepthPreviewCanvas,
   createMaskPreviewCanvas,
   createNormalsPreviewCanvas,
   extractImageColorsAtSize,
 } from '../editor/geometryVisualizations';
+import type { Vec3Tuple } from '../geometry/geometryAccess';
+import { PlaneFrame, type SurfaceSelectionOutcome } from '../geometry/planeFrame';
 
 const API_BASE = ((import.meta.env.VITE_API_BASE_URL as string | undefined) ?? '').replace(
   /\/+$/,
@@ -107,5 +109,111 @@ export async function fetchGeometryForImage(
     normals,
     colors,
     previews,
+  };
+}
+
+interface BackendVec2 {
+  x: number;
+  y: number;
+}
+
+interface BackendSurfaceSelectionPayload {
+  ok: boolean;
+  reason?: string;
+  selection?: {
+    seed_image_point: BackendVec2;
+    seed_inference_pixel: BackendVec2;
+    seed_point_3d: Vec3Tuple;
+    plane: {
+      origin: Vec3Tuple;
+      normal: Vec3Tuple;
+    };
+    frame: {
+      origin: Vec3Tuple;
+      normal: Vec3Tuple;
+      u_axis: Vec3Tuple;
+      v_axis: Vec3Tuple;
+    };
+    support_mask_b64: string;
+    support_width: number;
+    support_height: number;
+    inlier_count: number;
+    rms_error: number;
+    suggested_footprint: {
+      min_u: number;
+      max_u: number;
+      min_v: number;
+      max_v: number;
+    };
+    reference_brush_diameter: number;
+  };
+}
+
+function decodeBase64Uint8(encoded: string): Uint8Array {
+  const binary = window.atob(encoded);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+export async function selectSurfaceForGeometry(
+  geometryId: string,
+  imagePoint: Point2D,
+  signal?: AbortSignal,
+): Promise<SurfaceSelectionOutcome> {
+  const response = await fetch(
+    `${API_BASE}/api/geometry/${encodeURIComponent(geometryId)}/surface/select`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image_x: imagePoint.x, image_y: imagePoint.y }),
+      signal,
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(await parseErrorMessage(response));
+  }
+
+  const payload = (await response.json()) as BackendSurfaceSelectionPayload;
+  if (!payload.ok || !payload.selection) {
+    return {
+      ok: false,
+      reason: payload.reason ?? 'Could not select a planar surface at that location.',
+    };
+  }
+
+  const s = payload.selection;
+  const supportMask = decodeBase64Uint8(s.support_mask_b64);
+  const expectedLen = s.support_width * s.support_height;
+  if (supportMask.length !== expectedLen) {
+    throw new Error(
+      `Expected ${expectedLen} surface support mask bytes, received ${supportMask.length}.`,
+    );
+  }
+
+  const frame = new PlaneFrame(s.frame.origin, s.frame.normal, s.frame.u_axis, s.frame.v_axis);
+
+  return {
+    ok: true,
+    selection: {
+      seedImagePoint: s.seed_image_point,
+      seedInferencePixel: s.seed_inference_pixel,
+      seedPoint3D: s.seed_point_3d,
+      plane: s.plane,
+      frame,
+      supportMask,
+      inlierCount: s.inlier_count,
+      rmsError: s.rms_error,
+      suggestedFootprint: {
+        minU: s.suggested_footprint.min_u,
+        maxU: s.suggested_footprint.max_u,
+        minV: s.suggested_footprint.min_v,
+        maxV: s.suggested_footprint.max_v,
+      },
+      referenceBrushDiameter: s.reference_brush_diameter,
+    },
   };
 }
