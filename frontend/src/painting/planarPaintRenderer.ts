@@ -33,7 +33,7 @@ import {
   computeImagePaintSpec,
   rebuildImageLayerRgba,
 } from './imageSpacePaint';
-import { PaintDocument, type PaintDocumentState } from './paintDocument';
+import type { PaintDocumentState } from './paintDocument';
 import {
   type DecalTextureSpec,
   type PlanarDecalSurface,
@@ -428,51 +428,20 @@ void main() {
     discard;
   }
 
-  vec4 origColor = computeBasePixel();
-  vec3 finalRgb = origColor.rgb;
-  float finalAlpha = origColor.a;
-
-  if (paintAlpha > 0.001) {
-    if (uEffectivePaintMode == 0) {
-      finalRgb = mix(origColor.rgb, paintRgb, paintAlpha);
-    } else {
-      vec3 origLin = srgbToLinearVec3(origColor.rgb);
-      vec3 paintLin = srgbToLinearVec3(paintRgb);
-      vec3 alb = clamp(sampleBilinearFloat3(uAlbedoTex, uvImg, uAppearanceSize), 0.0, 1.0);
-      vec3 shdRaw = max(sampleBilinearFloat3(uShadingTex, uvImg, uAppearanceSize), vec3(0.0));
-      vec3 sCal = min(shdRaw * uShadingScale, vec3(uMaxCalibratedShading));
-
-      vec3 targetAlb = paintLin;
-      if (uEffectivePaintMode == 2 && uTexturePreservation > 0.001) {
-        vec3 albSmooth = sampleAlbedoSmooth5x5(uAlbedoTex, uvImg, uAppearanceSize, alb);
-        vec3 detail = clamp(alb / max(albSmooth, vec3(0.05)), 0.5, 1.5);
-        targetAlb = clamp(paintLin * mix(vec3(1.0), detail, clamp(uTexturePreservation, 0.0, 1.0)), 0.0, 1.0);
-      }
-
-      vec3 outLin = clamp(origLin + paintAlpha * sCal * (targetAlb - alb), 0.0, 1.0);
-      finalRgb = linearToSrgbVec3(outLin);
-    }
-    finalAlpha = max(origColor.a, paintAlpha);
-  }
-
-  if (uShowSupport > 0.5) {
-    vec4 sup = texture2D(uSupportTex, uvImg);
-    if (sup.a > 0.01) {
-      finalRgb = mix(finalRgb, sup.rgb, (1.0 - paintAlpha) * sup.a * 0.28);
-    }
-  }
+  vec3 outRgb = paintAlpha > 0.001 ? computeLitTargetRgb(uvImg, paintRgb) : vec3(0.0);
+  float outAlpha = paintAlpha;
 
   if (showBorder) {
     float lineAlpha = visibility > 0.5 ? 0.85 : 0.25;
     vec3 lineCol = visibility > 0.5 ? uSurfaceAccent : vec3(0.85, 0.65, 0.25);
-    finalRgb = mix(finalRgb, lineCol, lineAlpha);
-    finalAlpha = max(finalAlpha, lineAlpha);
+    outRgb = paintAlpha > 0.001 ? mix(outRgb, lineCol, lineAlpha) : lineCol;
+    outAlpha = max(outAlpha, lineAlpha);
   } else if (showTint) {
-    finalRgb = mix(finalRgb, uSurfaceAccent, 0.06);
-    finalAlpha = max(finalAlpha, 0.06);
+    outRgb = uSurfaceAccent;
+    outAlpha = 0.06;
   }
 
-  gl_FragColor = vec4(finalRgb * finalAlpha, finalAlpha);
+  gl_FragColor = vec4(outRgb * outAlpha, outAlpha);
 }
 `;
 
@@ -622,7 +591,6 @@ export class PlanarPaintRenderer {
   private readonly camera: THREE.OrthographicCamera;
   private readonly quadGeometry: THREE.PlaneGeometry;
   private readonly baseMaterial: THREE.ShaderMaterial;
-  private readonly decalMaterial: THREE.ShaderMaterial;
   private readonly overlayMaterial: THREE.ShaderMaterial;
   private readonly curvedArtworkMaterial: THREE.ShaderMaterial;
   private readonly mesh: THREE.Mesh;
@@ -710,8 +678,7 @@ export class PlanarPaintRenderer {
   private readonly decalEntries = new Map<string, DecalGpuCacheEntry>();
   private readonly artworkEntries = new Map<string, ArtworkGpuCacheEntry>();
   private readonly curvedMappingGeometries = new Map<string, THREE.BufferGeometry>();
-  private curvedLayerEntry: ImageLayerGpuCacheEntry | null = null;
-  private fallback2dLayerEntry: ImageLayerGpuCacheEntry | null = null;
+  private readonly imageLayerEntries = new Map<string, ImageLayerGpuCacheEntry>();
   private disposed = false;
 
   constructor(hostContainer: HTMLElement) {
@@ -796,16 +763,6 @@ export class PlanarPaintRenderer {
       uArtworkOpacity: this.uDecalArtworkOpacity,
       uPremultipliedPaint: this.uDecalPremultipliedPaint,
     };
-
-    this.decalMaterial = new THREE.ShaderMaterial({
-      vertexShader: QUAD_VERTEX_SHADER,
-      fragmentShader: DECAL_FRAGMENT_SHADER,
-      depthTest: false,
-      depthWrite: false,
-      transparent: false,
-      blending: THREE.NoBlending,
-      uniforms: decalUniforms,
-    });
 
     this.overlayMaterial = new THREE.ShaderMaterial({
       vertexShader: QUAD_VERTEX_SHADER,
@@ -1106,14 +1063,25 @@ export class PlanarPaintRenderer {
     layer: ImagePaintLayerKind,
     imageSize: Size2D,
     allStrokes: readonly ImageSpaceStroke[],
+    brushObjectId: string | null,
     activePreview: ActiveImageStrokePreview | null,
   ): { entry: ImageLayerGpuCacheEntry; hasPaint: boolean } {
-    const layerStrokes = allStrokes.filter((s) => s.layer === layer);
+    const layerStrokes =
+      brushObjectId === null
+        ? []
+        : allStrokes.filter(
+            (s) =>
+              s.layer === layer &&
+              (brushObjectId === '__untagged__'
+                ? s.brushObjectId === undefined
+                : s.brushObjectId === brushObjectId),
+          );
     const livePreview = activePreview && activePreview.layer === layer ? activePreview : null;
     const spec = computeImagePaintSpec(imageSize);
     const sig = layerStrokes.map((s) => s.id).join('|');
+    const cacheKey = `${brushObjectId ?? '__live__'}:${layer}`;
 
-    let entry = layer === 'curved' ? this.curvedLayerEntry : this.fallback2dLayerEntry;
+    let entry = this.imageLayerEntries.get(cacheKey) ?? null;
     if (!entry || entry.width !== spec.width || entry.height !== spec.height) {
       entry?.texture.dispose();
       const byteLength = spec.width * spec.height * 4;
@@ -1147,11 +1115,7 @@ export class PlanarPaintRenderer {
         activePreviewId: null,
         activePreviewRevision: 0,
       };
-      if (layer === 'curved') {
-        this.curvedLayerEntry = entry;
-      } else {
-        this.fallback2dLayerEntry = entry;
-      }
+      this.imageLayerEntries.set(cacheKey, entry);
     }
 
     let needsUpload = false;
@@ -1309,12 +1273,22 @@ export class PlanarPaintRenderer {
   private getOrSyncDecalEntry(
     surface: PlanarDecalSurface,
     doc: PaintDocumentState,
+    brushObjectId: string | null,
     pendingStrokes: readonly BrushStroke[],
     activeStroke: BrushStroke | null,
   ): { entry: DecalGpuCacheEntry; hasPaint: boolean } {
     const footprint = getEffectiveFootprint(surface);
     const footprintKey = buildFootprintKey(footprint);
-    const committedStrokes = PaintDocument.getStrokesForSurface(doc, surface.id);
+    const committedStrokes =
+      brushObjectId === null
+        ? []
+        : doc.strokes.filter(
+            (stroke) =>
+              stroke.surfaceId === surface.id &&
+              (brushObjectId === '__untagged__'
+                ? stroke.brushObjectId === undefined
+                : stroke.brushObjectId === brushObjectId),
+          );
     const liveStroke = activeStroke && activeStroke.surfaceId === surface.id ? activeStroke : null;
     const frozenPending = pendingStrokes.filter(
       (s) => s.surfaceId === surface.id && s.id !== liveStroke?.id,
@@ -1322,8 +1296,9 @@ export class PlanarPaintRenderer {
     const baseStrokes =
       frozenPending.length > 0 ? [...committedStrokes, ...frozenPending] : committedStrokes;
     const committedSig = buildCommittedSignature(baseStrokes);
+    const cacheKey = `${brushObjectId ?? '__live__'}:${surface.id}`;
 
-    let entry = this.decalEntries.get(surface.id);
+    let entry = this.decalEntries.get(cacheKey);
     const spec =
       entry?.footprintKey === footprintKey ? entry.spec : computeDecalTextureSpec(footprint);
 
@@ -1362,7 +1337,7 @@ export class PlanarPaintRenderer {
         activeStrokePointCount: 0,
         activeMask: null,
       };
-      this.decalEntries.set(surface.id, entry);
+      this.decalEntries.set(cacheKey, entry);
     }
 
     let needsTextureUpload = false;
@@ -1517,6 +1492,207 @@ export class PlanarPaintRenderer {
     return geom;
   }
 
+  private renderBrushObjectPass(params: {
+    brushObjectId: string | null;
+    doc: PaintDocumentState;
+    imageSize: Size2D;
+    geometry: GeometryData | null;
+    appearance: AppearanceData | null;
+    allSurfaces: readonly PlanarDecalSurface[];
+    pendingStrokes: readonly BrushStroke[];
+    activeStroke: BrushStroke | null;
+    activeImagePreview: ActiveImageStrokePreview | null;
+  }): void {
+    const {
+      brushObjectId,
+      doc,
+      imageSize,
+      geometry,
+      appearance,
+      allSurfaces,
+      pendingStrokes,
+      activeStroke,
+      activeImagePreview,
+    } = params;
+
+    this.mesh.material = this.overlayMaterial;
+    this.uDecalIsArtwork.value = 0;
+    this.uDecalPremultipliedPaint.value = 0;
+    this.uDecalArtworkOpacity.value = 1;
+    this.uDecalShowFootprint.value = 0;
+    this.uDecalDepthTolRatio.value = 0.035;
+    this.uDecalMinNormalDot.value = 0.45;
+    // Brush objects composite cleanly in user display priority without clipping across older surface ownership.
+    this.uDecalUseOwnerMask.value = 0;
+
+    if (geometry && allSurfaces.length > 0) {
+      this.uDecalLayerKind.value = 0;
+      for (let i = 0; i < allSurfaces.length; i++) {
+        const surface = allSurfaces[i];
+        if (!surface) continue;
+
+        const { entry, hasPaint } = this.getOrSyncDecalEntry(
+          surface,
+          doc,
+          brushObjectId,
+          pendingStrokes,
+          activeStroke,
+        );
+        if (!hasPaint) {
+          continue;
+        }
+
+        const calibration =
+          appearance && doc.paintMode !== 'flat'
+            ? this.getSurfaceCalibration(surface, geometry, appearance)
+            : null;
+        this.uDecalEffectivePaintMode.value = this.resolveEffectiveModeCode(
+          doc.paintMode,
+          appearance,
+          calibration,
+        );
+        this.uDecalShadingScale.value = calibration?.scale ?? 1.0;
+
+        const accent = getSurfaceAccentColor(surface.colorIndex);
+        this.uDecalPaintTex.value = entry.texture;
+        this.uDecalHasPaint.value = 1;
+        this.uDecalSurfaceIndex.value = i + 1;
+        this.uDecalSurfaceAccent.value.set(
+          accent.rgb[0] / 255,
+          accent.rgb[1] / 255,
+          accent.rgb[2] / 255,
+        );
+        this.uDecalPlaneOrigin.value.set(...surface.frame.origin);
+        this.uDecalPlaneNormal.value.set(...surface.frame.normal);
+        this.uDecalPlaneU.value.set(...surface.frame.uAxis);
+        this.uDecalPlaneV.value.set(...surface.frame.vAxis);
+        this.uDecalFootprint.value.set(
+          entry.footprint.minU,
+          entry.footprint.maxU,
+          entry.footprint.minV,
+          entry.footprint.maxV,
+        );
+        this.uDecalFitRms.value = surface.rmsError;
+
+        this.renderer.render(this.scene, this.camera);
+      }
+    }
+
+    const { entry: curvedEntry, hasPaint: hasCurvedPaint } = this.getOrSyncImageLayerEntry(
+      'curved',
+      imageSize,
+      doc.imageStrokes,
+      brushObjectId,
+      activeImagePreview,
+    );
+    if (geometry && hasCurvedPaint) {
+      const sceneCalib =
+        appearance && doc.paintMode !== 'flat'
+          ? this.getSceneCalibration(geometry, appearance)
+          : null;
+      this.uDecalLayerKind.value = 1;
+      this.uDecalPaintTex.value = curvedEntry.texture;
+      this.uDecalEffectivePaintMode.value = this.resolveEffectiveModeCode(
+        doc.paintMode,
+        appearance,
+        sceneCalib,
+      );
+      this.uDecalShadingScale.value = sceneCalib?.scale ?? 1.0;
+      this.renderer.render(this.scene, this.camera);
+    }
+
+    const { entry: fallbackEntry, hasPaint: hasFallbackPaint } = this.getOrSyncImageLayerEntry(
+      'fallback-2d',
+      imageSize,
+      doc.imageStrokes,
+      brushObjectId,
+      activeImagePreview,
+    );
+    if (hasFallbackPaint) {
+      this.uDecalLayerKind.value = 2;
+      this.uDecalPaintTex.value = fallbackEntry.texture;
+      this.uDecalEffectivePaintMode.value = 0;
+      this.renderer.render(this.scene, this.camera);
+    }
+  }
+
+  private renderArtworkPlacementPass(params: {
+    placement: ArtworkPlacement;
+    doc: PaintDocumentState;
+    geometry: GeometryData | null;
+    effectiveMode: number;
+    shadingScale: number;
+  }): void {
+    const { placement, doc, geometry, effectiveMode, shadingScale } = params;
+    if (!placement.visible || placement.opacity <= 0.001) {
+      return;
+    }
+    const artwork = doc.artworks.find((a) => a.id === placement.artworkId);
+    if (!artwork) {
+      return;
+    }
+
+    this.mesh.material = this.overlayMaterial;
+    this.uDecalIsArtwork.value = 1;
+    this.uDecalPremultipliedPaint.value = 1;
+    this.uDecalShowFootprint.value = 0;
+    this.uDecalHasPaint.value = 1;
+    this.uDecalUseOwnerMask.value = 0;
+    this.uDecalEffectivePaintMode.value = effectiveMode;
+    this.uDecalShadingScale.value = shadingScale;
+
+    const artTex = this.getOrSyncArtworkTexture(artwork);
+    this.uDecalPaintTex.value = artTex;
+    this.uDecalArtworkOpacity.value = placement.opacity;
+    this.uDecalArtRot.value.set(Math.cos(placement.rotationRad), Math.sin(placement.rotationRad));
+
+    if (placement.mapping.type === 'planar' && geometry) {
+      this.uDecalLayerKind.value = 0;
+      this.uDecalPlaneOrigin.value.set(...placement.mapping.frame.origin);
+      this.uDecalPlaneNormal.value.set(...placement.mapping.frame.normal);
+      this.uDecalPlaneU.value.set(...placement.mapping.frame.uAxis);
+      this.uDecalPlaneV.value.set(...placement.mapping.frame.vAxis);
+      this.uDecalArtCenter.value.set(placement.mapping.centerU, placement.mapping.centerV);
+      this.uDecalArtSize.value.set(
+        placement.mapping.baseWidthWorld * placement.scale,
+        placement.mapping.baseHeightWorld * placement.scale,
+      );
+      this.uDecalDepthTolRatio.value = placement.mapping.depthToleranceRatio;
+      this.uDecalFitRms.value = placement.mapping.rmsError;
+      this.uDecalMinNormalDot.value = placement.mapping.isApproximatelyPlanar ? 0.35 : 0.45;
+      this.renderer.render(this.scene, this.camera);
+    } else if (placement.mapping.type === 'curved' && geometry) {
+      const curvedGeom = this.getOrBuildCurvedMappingGeometry(placement.mapping.surfaceMapping);
+      this.uDecalArtCenter.value.set(placement.mapping.centerU, placement.mapping.centerV);
+      this.uDecalArtSize.value.set(
+        placement.mapping.baseWidthWorld * placement.scale,
+        placement.mapping.baseHeightWorld * placement.scale,
+      );
+      this.mesh.geometry = curvedGeom;
+      this.mesh.material = this.curvedArtworkMaterial;
+      try {
+        this.renderer.render(this.scene, this.camera);
+      } finally {
+        this.mesh.geometry = this.quadGeometry;
+        this.mesh.material = this.overlayMaterial;
+      }
+    } else if (placement.mapping.type === 'image-2d') {
+      this.uDecalLayerKind.value = 3;
+      this.uDecalArtCenter.value.set(placement.mapping.centerX, placement.mapping.centerY);
+      this.uDecalArtSize.value.set(
+        placement.mapping.baseWidthPx * placement.scale,
+        placement.mapping.baseHeightPx * placement.scale,
+      );
+      this.renderer.render(this.scene, this.camera);
+    }
+
+    this.uDecalIsArtwork.value = 0;
+    this.uDecalPremultipliedPaint.value = 0;
+    this.uDecalArtworkOpacity.value = 1;
+    this.uDecalDepthTolRatio.value = 0.035;
+    this.uDecalMinNormalDot.value = 0.45;
+  }
+
   private renderScenePasses(
     image: LoadedImage,
     geometry: GeometryData | null,
@@ -1583,11 +1759,35 @@ export class PlanarPaintRenderer {
     this.uDecalDepthTolRatio.value = 0.035;
     this.uDecalMinNormalDot.value = 0.45;
 
-    const liveIds = new Set(allSurfaces.map((s) => s.id));
-    for (const [id, entry] of this.decalEntries.entries()) {
-      if (!liveIds.has(id)) {
+    const hasLiveBrushInput =
+      activeStroke !== null || pendingStrokes.length > 0 || activeImagePreview !== null;
+    const hasUntaggedStrokes =
+      doc.strokes.some((s) => !s.brushObjectId) || doc.imageStrokes.some((s) => !s.brushObjectId);
+
+    const liveSurfaceIds = new Set(allSurfaces.map((s) => s.id));
+    const liveBrushKeyIds = new Set<string>(doc.brushObjects.map((b) => b.id));
+    if (hasLiveBrushInput) {
+      liveBrushKeyIds.add('__live__');
+    }
+    if (hasUntaggedStrokes) {
+      liveBrushKeyIds.add('__untagged__');
+    }
+
+    for (const [key, entry] of this.decalEntries.entries()) {
+      const sep = key.lastIndexOf(':');
+      const brushKey = sep >= 0 ? key.slice(0, sep) : '';
+      const surfaceId = sep >= 0 ? key.slice(sep + 1) : '';
+      if (!liveSurfaceIds.has(surfaceId) || !liveBrushKeyIds.has(brushKey)) {
         entry.texture.dispose();
-        this.decalEntries.delete(id);
+        this.decalEntries.delete(key);
+      }
+    }
+    for (const [key, entry] of this.imageLayerEntries.entries()) {
+      const sep = key.lastIndexOf(':');
+      const brushKey = sep >= 0 ? key.slice(0, sep) : '';
+      if (!liveBrushKeyIds.has(brushKey)) {
+        entry.texture.dispose();
+        this.imageLayerEntries.delete(key);
       }
     }
 
@@ -1628,41 +1828,136 @@ export class PlanarPaintRenderer {
       this.uDecalCy.value = intr.cy;
     }
 
-    if (geometry && allSurfaces.length > 0) {
-      this.uDecalLayerKind.value = 0;
+    const imageSize = { width: image.metadata.width, height: image.metadata.height };
+    const sceneCalib =
+      appearance && doc.paintMode !== 'flat'
+        ? this.getSceneCalibration(geometry, appearance)
+        : null;
+    const effectiveArtMode = this.resolveEffectiveModeCode(doc.paintMode, appearance, sceneCalib);
+    const artShadingScale = sceneCalib?.scale ?? 1.0;
 
-      this.mesh.material = this.decalMaterial;
-      for (let i = 0; i < allSurfaces.length; i++) {
-        const surface = allSurfaces[i];
-        if (!surface) continue;
+    if (hasUntaggedStrokes) {
+      this.renderBrushObjectPass({
+        brushObjectId: '__untagged__',
+        doc,
+        imageSize,
+        geometry,
+        appearance,
+        allSurfaces,
+        pendingStrokes: [],
+        activeStroke: null,
+        activeImagePreview: null,
+      });
+    }
 
-        const isActive = surface.id === doc.activeSurfaceId;
-        const showFootprint = !hideOverlays && isActive && doc.showFootprintPreview;
-        const { entry, hasPaint } = this.getOrSyncDecalEntry(
-          surface,
-          doc,
-          pendingStrokes,
-          activeStroke,
-        );
-        if (!hasPaint && !showFootprint) {
+    const targetLiveBrushId = doc.activeBrushObjectId;
+    let renderedLiveBrush = false;
+    const renderedBrushIds = new Set<string>();
+    const renderedPlacementIds = new Set<string>();
+
+    // Walk sceneOrder back-to-front (index 0 renders last / frontmost).
+    for (let i = doc.sceneOrder.length - 1; i >= 0; i--) {
+      const ref = doc.sceneOrder[i];
+      if (!ref) continue;
+
+      if (ref.kind === 'brush') {
+        const brushObj = doc.brushObjects.find((b) => b.id === ref.id);
+        if (!brushObj) continue;
+        renderedBrushIds.add(brushObj.id);
+        const isLiveTarget = brushObj.id === targetLiveBrushId && hasLiveBrushInput;
+        if (!brushObj.visible && !isLiveTarget) {
           continue;
         }
-
-        const calibration =
-          appearance && doc.paintMode !== 'flat'
-            ? this.getSurfaceCalibration(surface, geometry, appearance)
-            : null;
-        this.uDecalEffectivePaintMode.value = this.resolveEffectiveModeCode(
-          doc.paintMode,
+        if (isLiveTarget) {
+          renderedLiveBrush = true;
+        }
+        this.renderBrushObjectPass({
+          brushObjectId: brushObj.id,
+          doc,
+          imageSize,
+          geometry,
           appearance,
-          calibration,
-        );
-        this.uDecalShadingScale.value = calibration?.scale ?? 1.0;
+          allSurfaces,
+          pendingStrokes: isLiveTarget ? pendingStrokes : [],
+          activeStroke: isLiveTarget ? activeStroke : null,
+          activeImagePreview: isLiveTarget ? activeImagePreview : null,
+        });
+      } else {
+        const stored = doc.artworkPlacements.find((p) => p.id === ref.id);
+        if (!stored) continue;
+        renderedPlacementIds.add(stored.id);
+        const placement =
+          previewPlacement && previewPlacement.id === stored.id ? previewPlacement : stored;
+        this.renderArtworkPlacementPass({
+          placement,
+          doc,
+          geometry,
+          effectiveMode: effectiveArtMode,
+          shadingScale: artShadingScale,
+        });
+      }
+    }
 
+    // Defensive fallback if any state entries were created outside sceneOrder.
+    for (let i = 0; i < doc.brushObjects.length; i++) {
+      const brushObj = doc.brushObjects[i];
+      if (!brushObj || renderedBrushIds.has(brushObj.id)) continue;
+      const isLiveTarget = brushObj.id === targetLiveBrushId && hasLiveBrushInput;
+      if (!brushObj.visible && !isLiveTarget) continue;
+      if (isLiveTarget) renderedLiveBrush = true;
+      this.renderBrushObjectPass({
+        brushObjectId: brushObj.id,
+        doc,
+        imageSize,
+        geometry,
+        appearance,
+        allSurfaces,
+        pendingStrokes: isLiveTarget ? pendingStrokes : [],
+        activeStroke: isLiveTarget ? activeStroke : null,
+        activeImagePreview: isLiveTarget ? activeImagePreview : null,
+      });
+    }
+    for (let i = 0; i < doc.artworkPlacements.length; i++) {
+      const stored = doc.artworkPlacements[i];
+      if (!stored || renderedPlacementIds.has(stored.id)) continue;
+      const placement =
+        previewPlacement && previewPlacement.id === stored.id ? previewPlacement : stored;
+      this.renderArtworkPlacementPass({
+        placement,
+        doc,
+        geometry,
+        effectiveMode: effectiveArtMode,
+        shadingScale: artShadingScale,
+      });
+    }
+
+    // Render live preview when the user begins their very first stroke before any BrushObject exists.
+    if (hasLiveBrushInput && !renderedLiveBrush) {
+      this.renderBrushObjectPass({
+        brushObjectId: null,
+        doc,
+        imageSize,
+        geometry,
+        appearance,
+        allSurfaces,
+        pendingStrokes,
+        activeStroke,
+        activeImagePreview,
+      });
+    }
+
+    if (!hideOverlays && doc.showFootprintPreview && geometry && allSurfaces.length > 0) {
+      this.mesh.material = this.overlayMaterial;
+      this.uDecalLayerKind.value = 0;
+      this.uDecalIsArtwork.value = 0;
+      this.uDecalHasPaint.value = 0;
+      this.uDecalShowFootprint.value = 1;
+      this.uDecalUseOwnerMask.value = this.ownerTex ? 1 : 0;
+      for (let i = 0; i < allSurfaces.length; i++) {
+        const surface = allSurfaces[i];
+        if (!surface || surface.id !== doc.activeSurfaceId) continue;
+        const footprint = getEffectiveFootprint(surface);
         const accent = getSurfaceAccentColor(surface.colorIndex);
-        this.uDecalPaintTex.value = entry.texture;
-        this.uDecalHasPaint.value = hasPaint ? 1 : 0;
-        this.uDecalShowFootprint.value = showFootprint ? 1 : 0;
         this.uDecalSurfaceIndex.value = i + 1;
         this.uDecalSurfaceAccent.value.set(
           accent.rgb[0] / 255,
@@ -1674,141 +1969,15 @@ export class PlanarPaintRenderer {
         this.uDecalPlaneU.value.set(...surface.frame.uAxis);
         this.uDecalPlaneV.value.set(...surface.frame.vAxis);
         this.uDecalFootprint.value.set(
-          entry.footprint.minU,
-          entry.footprint.maxU,
-          entry.footprint.minV,
-          entry.footprint.maxV,
+          footprint.minU,
+          footprint.maxU,
+          footprint.minV,
+          footprint.maxV,
         );
         this.uDecalFitRms.value = surface.rmsError;
-
         this.renderer.render(this.scene, this.camera);
       }
-    }
-
-    const imageSize = { width: image.metadata.width, height: image.metadata.height };
-    const { entry: curvedEntry, hasPaint: hasCurvedPaint } = this.getOrSyncImageLayerEntry(
-      'curved',
-      imageSize,
-      doc.imageStrokes,
-      activeImagePreview,
-    );
-    if (geometry && hasCurvedPaint) {
-      const sceneCalib =
-        appearance && doc.paintMode !== 'flat'
-          ? this.getSceneCalibration(geometry, appearance)
-          : null;
-      this.mesh.material = this.overlayMaterial;
-      this.uDecalLayerKind.value = 1;
-      this.uDecalPaintTex.value = curvedEntry.texture;
-      this.uDecalEffectivePaintMode.value = this.resolveEffectiveModeCode(
-        doc.paintMode,
-        appearance,
-        sceneCalib,
-      );
-      this.uDecalShadingScale.value = sceneCalib?.scale ?? 1.0;
-      this.renderer.render(this.scene, this.camera);
-    }
-
-    const { entry: fallbackEntry, hasPaint: hasFallbackPaint } = this.getOrSyncImageLayerEntry(
-      'fallback-2d',
-      imageSize,
-      doc.imageStrokes,
-      activeImagePreview,
-    );
-    if (hasFallbackPaint) {
-      this.mesh.material = this.overlayMaterial;
-      this.uDecalLayerKind.value = 2;
-      this.uDecalIsArtwork.value = 0;
-      this.uDecalPremultipliedPaint.value = 0;
-      this.uDecalPaintTex.value = fallbackEntry.texture;
-      this.uDecalEffectivePaintMode.value = 0;
-      this.renderer.render(this.scene, this.camera);
-    }
-
-    if (doc.artworkPlacements.length > 0) {
-      const sceneCalib =
-        appearance && doc.paintMode !== 'flat'
-          ? this.getSceneCalibration(geometry, appearance)
-          : null;
-      const effectiveMode = this.resolveEffectiveModeCode(doc.paintMode, appearance, sceneCalib);
-      const shadingScale = sceneCalib?.scale ?? 1.0;
-
-      this.mesh.material = this.overlayMaterial;
-      this.uDecalIsArtwork.value = 1;
-      this.uDecalPremultipliedPaint.value = 1;
       this.uDecalShowFootprint.value = 0;
-      this.uDecalHasPaint.value = 1;
-      this.uDecalUseOwnerMask.value = 0;
-      this.uDecalEffectivePaintMode.value = effectiveMode;
-      this.uDecalShadingScale.value = shadingScale;
-
-      for (let i = 0; i < doc.artworkPlacements.length; i++) {
-        const stored = doc.artworkPlacements[i];
-        if (!stored) continue;
-        const placement =
-          previewPlacement && previewPlacement.id === stored.id ? previewPlacement : stored;
-        if (!placement.visible || placement.opacity <= 0.001) {
-          continue;
-        }
-        const artwork = doc.artworks.find((a) => a.id === placement.artworkId);
-        if (!artwork) {
-          continue;
-        }
-
-        const artTex = this.getOrSyncArtworkTexture(artwork);
-        this.uDecalPaintTex.value = artTex;
-        this.uDecalArtworkOpacity.value = placement.opacity;
-        this.uDecalArtRot.value.set(
-          Math.cos(placement.rotationRad),
-          Math.sin(placement.rotationRad),
-        );
-
-        if (placement.mapping.type === 'planar' && geometry) {
-          this.uDecalLayerKind.value = 0;
-          this.uDecalPlaneOrigin.value.set(...placement.mapping.frame.origin);
-          this.uDecalPlaneNormal.value.set(...placement.mapping.frame.normal);
-          this.uDecalPlaneU.value.set(...placement.mapping.frame.uAxis);
-          this.uDecalPlaneV.value.set(...placement.mapping.frame.vAxis);
-          this.uDecalArtCenter.value.set(placement.mapping.centerU, placement.mapping.centerV);
-          this.uDecalArtSize.value.set(
-            placement.mapping.baseWidthWorld * placement.scale,
-            placement.mapping.baseHeightWorld * placement.scale,
-          );
-          this.uDecalDepthTolRatio.value = placement.mapping.depthToleranceRatio;
-          this.uDecalFitRms.value = placement.mapping.rmsError;
-          this.uDecalMinNormalDot.value = placement.mapping.isApproximatelyPlanar ? 0.35 : 0.45;
-          this.renderer.render(this.scene, this.camera);
-        } else if (placement.mapping.type === 'curved' && geometry) {
-          const curvedGeom = this.getOrBuildCurvedMappingGeometry(placement.mapping.surfaceMapping);
-          this.uDecalArtCenter.value.set(placement.mapping.centerU, placement.mapping.centerV);
-          this.uDecalArtSize.value.set(
-            placement.mapping.baseWidthWorld * placement.scale,
-            placement.mapping.baseHeightWorld * placement.scale,
-          );
-          this.mesh.geometry = curvedGeom;
-          this.mesh.material = this.curvedArtworkMaterial;
-          try {
-            this.renderer.render(this.scene, this.camera);
-          } finally {
-            this.mesh.geometry = this.quadGeometry;
-            this.mesh.material = this.overlayMaterial;
-          }
-        } else if (placement.mapping.type === 'image-2d') {
-          this.uDecalLayerKind.value = 3;
-          this.uDecalArtCenter.value.set(placement.mapping.centerX, placement.mapping.centerY);
-          this.uDecalArtSize.value.set(
-            placement.mapping.baseWidthPx * placement.scale,
-            placement.mapping.baseHeightPx * placement.scale,
-          );
-          this.renderer.render(this.scene, this.camera);
-        }
-      }
-
-      this.uDecalIsArtwork.value = 0;
-      this.uDecalPremultipliedPaint.value = 0;
-      this.uDecalArtworkOpacity.value = 1;
-      this.uDecalDepthTolRatio.value = 0.035;
-      this.uDecalMinNormalDot.value = 0.45;
     }
   }
 
@@ -2001,10 +2170,10 @@ export class PlanarPaintRenderer {
       cachedGeom.dispose();
     }
     this.curvedMappingGeometries.clear();
-    this.curvedLayerEntry?.texture.dispose();
-    this.curvedLayerEntry = null;
-    this.fallback2dLayerEntry?.texture.dispose();
-    this.fallback2dLayerEntry = null;
+    for (const entry of this.imageLayerEntries.values()) {
+      entry.texture.dispose();
+    }
+    this.imageLayerEntries.clear();
 
     this.rgbTex?.dispose();
     this.depthTex?.dispose();
@@ -2020,7 +2189,6 @@ export class PlanarPaintRenderer {
 
     this.quadGeometry.dispose();
     this.baseMaterial.dispose();
-    this.decalMaterial.dispose();
     this.overlayMaterial.dispose();
     this.curvedArtworkMaterial.dispose();
     this.renderer.dispose();

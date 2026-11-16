@@ -16,14 +16,25 @@ export interface BrushUiConfig {
   hardness: number;
 }
 
+export interface BrushObject {
+  id: string;
+  label: string;
+  visible: boolean;
+}
+
+export type SceneLayerRef = { kind: 'brush'; id: string } | { kind: 'artwork'; id: string };
+
 export interface PaintHistorySnapshot {
   surfaces: PlanarDecalSurface[];
   activeSurfaceId: string | null;
   strokes: BrushStroke[];
   imageStrokes: ImageSpaceStroke[];
   lastAnchorMode: AutoAnchorMode | null;
+  brushObjects: BrushObject[];
+  activeBrushObjectId: string | null;
   artworkPlacements: ArtworkPlacement[];
   activePlacementId: string | null;
+  sceneOrder: SceneLayerRef[];
 }
 
 export interface PaintDocumentState {
@@ -32,12 +43,16 @@ export interface PaintDocumentState {
   strokes: BrushStroke[];
   imageStrokes: ImageSpaceStroke[];
   lastAnchorMode: AutoAnchorMode | null;
+  brushObjects: BrushObject[];
+  activeBrushObjectId: string | null;
+  nextBrushNumber: number;
   artworks: Artwork[];
   activeArtworkId: string | null;
   artworkPlacements: ArtworkPlacement[];
   activePlacementId: string | null;
   nextArtworkNumber: number;
   nextPlacementNumber: number;
+  sceneOrder: SceneLayerRef[];
   undoStack: PaintHistorySnapshot[];
   redoStack: PaintHistorySnapshot[];
   nextSurfaceNumber: number;
@@ -65,6 +80,7 @@ export const DEFAULT_TEXTURE_PRESERVATION = 0.75;
 
 const MAX_UNDO_HISTORY = 100;
 let nextSurfaceSeq = 1;
+let nextBrushObjSeq = 1;
 
 function createSnapshot(doc: PaintDocumentState): PaintHistorySnapshot {
   return {
@@ -73,14 +89,103 @@ function createSnapshot(doc: PaintDocumentState): PaintHistorySnapshot {
     strokes: doc.strokes,
     imageStrokes: doc.imageStrokes,
     lastAnchorMode: doc.lastAnchorMode,
+    brushObjects: doc.brushObjects,
+    activeBrushObjectId: doc.activeBrushObjectId,
     artworkPlacements: doc.artworkPlacements,
     activePlacementId: doc.activePlacementId,
+    sceneOrder: doc.sceneOrder,
   };
 }
 
 function pushUndoSnapshot(doc: PaintDocumentState): PaintHistorySnapshot[] {
   const next = [...doc.undoStack, createSnapshot(doc)];
   return next.length > MAX_UNDO_HISTORY ? next.slice(next.length - MAX_UNDO_HISTORY) : next;
+}
+
+function resolveTargetBrushObject(
+  doc: PaintDocumentState,
+  requestedId?: string,
+): {
+  brushObjectId: string;
+  brushObjects: BrushObject[];
+  activeBrushObjectId: string;
+  nextBrushNumber: number;
+  sceneOrder: SceneLayerRef[];
+} {
+  const candidateId =
+    requestedId && doc.brushObjects.some((b) => b.id === requestedId)
+      ? requestedId
+      : doc.activeBrushObjectId && doc.brushObjects.some((b) => b.id === doc.activeBrushObjectId)
+        ? doc.activeBrushObjectId
+        : null;
+
+  if (candidateId) {
+    const brushObjects = doc.brushObjects.map((b) =>
+      b.id === candidateId && !b.visible ? { ...b, visible: true } : b,
+    );
+    const hasSceneEntry = doc.sceneOrder.some(
+      (ref) => ref.kind === 'brush' && ref.id === candidateId,
+    );
+    return {
+      brushObjectId: candidateId,
+      brushObjects,
+      activeBrushObjectId: candidateId,
+      nextBrushNumber: doc.nextBrushNumber,
+      sceneOrder: hasSceneEntry
+        ? doc.sceneOrder
+        : [{ kind: 'brush', id: candidateId }, ...doc.sceneOrder],
+    };
+  }
+
+  const newId = `brush-${nextBrushObjSeq++}`;
+  const label = `Brush ${doc.nextBrushNumber}`;
+  const created: BrushObject = { id: newId, label, visible: true };
+  return {
+    brushObjectId: newId,
+    brushObjects: [...doc.brushObjects, created],
+    activeBrushObjectId: newId,
+    nextBrushNumber: doc.nextBrushNumber + 1,
+    sceneOrder: [{ kind: 'brush', id: newId }, ...doc.sceneOrder],
+  };
+}
+
+function restoreSnapshot(
+  doc: PaintDocumentState,
+  snapshot: PaintHistorySnapshot,
+  undoStack: PaintHistorySnapshot[],
+  redoStack: PaintHistorySnapshot[],
+): PaintDocumentState {
+  const liveArtworkIds = new Set(doc.artworks.map((a) => a.id));
+  const validPlacements = snapshot.artworkPlacements.filter((p) => liveArtworkIds.has(p.artworkId));
+  const validPlacementIds = new Set(validPlacements.map((p) => p.id));
+  const validBrushIds = new Set(snapshot.brushObjects.map((b) => b.id));
+  const validActivePlacement =
+    snapshot.activePlacementId && validPlacementIds.has(snapshot.activePlacementId)
+      ? snapshot.activePlacementId
+      : (validPlacements[validPlacements.length - 1]?.id ?? null);
+  const validActiveBrush =
+    snapshot.activeBrushObjectId && validBrushIds.has(snapshot.activeBrushObjectId)
+      ? snapshot.activeBrushObjectId
+      : (snapshot.brushObjects[0]?.id ?? null);
+  const validSceneOrder = snapshot.sceneOrder.filter((ref) =>
+    ref.kind === 'brush' ? validBrushIds.has(ref.id) : validPlacementIds.has(ref.id),
+  );
+
+  return {
+    ...doc,
+    surfaces: snapshot.surfaces,
+    activeSurfaceId: snapshot.activeSurfaceId,
+    strokes: snapshot.strokes,
+    imageStrokes: snapshot.imageStrokes,
+    lastAnchorMode: snapshot.lastAnchorMode,
+    brushObjects: snapshot.brushObjects,
+    activeBrushObjectId: validActiveBrush,
+    artworkPlacements: validPlacements,
+    activePlacementId: validActivePlacement,
+    sceneOrder: validSceneOrder,
+    undoStack,
+    redoStack,
+  };
 }
 
 export const PaintDocument = {
@@ -98,12 +203,16 @@ export const PaintDocument = {
       strokes: [],
       imageStrokes: [],
       lastAnchorMode: null,
+      brushObjects: [],
+      activeBrushObjectId: null,
+      nextBrushNumber: 1,
       artworks: preservedArtworks ? [...preservedArtworks] : [],
       activeArtworkId: preservedActiveArtworkId ?? null,
       artworkPlacements: [],
       activePlacementId: null,
       nextArtworkNumber: preservedNextArtworkNumber ?? 1,
       nextPlacementNumber: 1,
+      sceneOrder: [],
       undoStack: [],
       redoStack: [],
       nextSurfaceNumber: 1,
@@ -320,9 +429,19 @@ export const PaintDocument = {
     if (valid.length === 0) {
       return doc;
     }
+    const resolved = resolveTargetBrushObject(doc, valid[0]?.brushObjectId);
+    const tagged = valid.map((s) =>
+      s.brushObjectId && resolved.brushObjects.some((b) => b.id === s.brushObjectId)
+        ? s
+        : { ...s, brushObjectId: resolved.brushObjectId },
+    );
     return {
       ...doc,
-      strokes: [...doc.strokes, ...valid],
+      brushObjects: resolved.brushObjects,
+      activeBrushObjectId: resolved.activeBrushObjectId,
+      nextBrushNumber: resolved.nextBrushNumber,
+      sceneOrder: resolved.sceneOrder,
+      strokes: [...doc.strokes, ...tagged],
       undoStack: pushUndoSnapshot(doc),
       redoStack: [],
     };
@@ -360,14 +479,92 @@ export const PaintDocument = {
       return doc;
     }
 
+    const requestedBrushId = validPlanar?.brushObjectId ?? validImage?.brushObjectId;
+    const resolved = resolveTargetBrushObject(doc, requestedBrushId);
+    const taggedPlanar = validPlanar
+      ? { ...validPlanar, brushObjectId: resolved.brushObjectId }
+      : null;
+    const taggedImage = validImage
+      ? { ...validImage, brushObjectId: resolved.brushObjectId }
+      : null;
+
     return {
       ...doc,
       surfaces: nextSurfaces,
       activeSurfaceId: nextActive,
       nextSurfaceNumber: hasNewSurf ? doc.nextSurfaceNumber + 1 : doc.nextSurfaceNumber,
-      strokes: validPlanar ? [...doc.strokes, validPlanar] : doc.strokes,
-      imageStrokes: validImage ? [...doc.imageStrokes, validImage] : doc.imageStrokes,
+      brushObjects: resolved.brushObjects,
+      activeBrushObjectId: resolved.activeBrushObjectId,
+      nextBrushNumber: resolved.nextBrushNumber,
+      sceneOrder: resolved.sceneOrder,
+      strokes: taggedPlanar ? [...doc.strokes, taggedPlanar] : doc.strokes,
+      imageStrokes: taggedImage ? [...doc.imageStrokes, taggedImage] : doc.imageStrokes,
       lastAnchorMode: anchorMode,
+      undoStack: pushUndoSnapshot(doc),
+      redoStack: [],
+    };
+  },
+
+  createBrushObject(doc: PaintDocumentState, customLabel?: string): PaintDocumentState {
+    const id = `brush-${nextBrushObjSeq++}`;
+    const trimmed = customLabel?.trim();
+    const label = trimmed && trimmed.length > 0 ? trimmed : `Brush ${doc.nextBrushNumber}`;
+    const created: BrushObject = { id, label, visible: true };
+    return {
+      ...doc,
+      brushObjects: [...doc.brushObjects, created],
+      activeBrushObjectId: id,
+      nextBrushNumber: doc.nextBrushNumber + 1,
+      sceneOrder: [{ kind: 'brush', id }, ...doc.sceneOrder],
+      undoStack: pushUndoSnapshot(doc),
+      redoStack: [],
+    };
+  },
+
+  setActiveBrushObject(doc: PaintDocumentState, brushObjectId: string | null): PaintDocumentState {
+    if (brushObjectId !== null && !doc.brushObjects.some((b) => b.id === brushObjectId)) {
+      return doc;
+    }
+    return doc.activeBrushObjectId === brushObjectId
+      ? doc
+      : { ...doc, activeBrushObjectId: brushObjectId };
+  },
+
+  toggleBrushObjectVisibility(doc: PaintDocumentState, brushObjectId: string): PaintDocumentState {
+    if (!doc.brushObjects.some((b) => b.id === brushObjectId)) {
+      return doc;
+    }
+    return {
+      ...doc,
+      brushObjects: doc.brushObjects.map((b) =>
+        b.id === brushObjectId ? { ...b, visible: !b.visible } : b,
+      ),
+      undoStack: pushUndoSnapshot(doc),
+      redoStack: [],
+    };
+  },
+
+  removeBrushObject(doc: PaintDocumentState, brushObjectId: string): PaintDocumentState {
+    if (!doc.brushObjects.some((b) => b.id === brushObjectId)) {
+      return doc;
+    }
+    const nextBrushObjects = doc.brushObjects.filter((b) => b.id !== brushObjectId);
+    const nextSceneOrder = doc.sceneOrder.filter(
+      (ref) => !(ref.kind === 'brush' && ref.id === brushObjectId),
+    );
+    const nextActiveBrush =
+      doc.activeBrushObjectId === brushObjectId
+        ? (nextSceneOrder.find((ref) => ref.kind === 'brush')?.id ??
+          nextBrushObjects[0]?.id ??
+          null)
+        : doc.activeBrushObjectId;
+    return {
+      ...doc,
+      brushObjects: nextBrushObjects,
+      activeBrushObjectId: nextActiveBrush,
+      sceneOrder: nextSceneOrder,
+      strokes: doc.strokes.filter((s) => s.brushObjectId !== brushObjectId),
+      imageStrokes: doc.imageStrokes.filter((s) => s.brushObjectId !== brushObjectId),
       undoStack: pushUndoSnapshot(doc),
       redoStack: [],
     };
@@ -406,15 +603,20 @@ export const PaintDocument = {
     const nextArtworks = doc.artworks.filter((a) => a.id !== artworkId);
     const nextActiveArtwork =
       doc.activeArtworkId === artworkId ? (nextArtworks[0]?.id ?? null) : doc.activeArtworkId;
-    const hadPlacements = doc.artworkPlacements.some((p) => p.artworkId === artworkId);
-    if (!hadPlacements) {
+    const removedPlacementIds = new Set(
+      doc.artworkPlacements.filter((p) => p.artworkId === artworkId).map((p) => p.id),
+    );
+    if (removedPlacementIds.size === 0) {
       return {
         ...doc,
         artworks: nextArtworks,
         activeArtworkId: nextActiveArtwork,
       };
     }
-    const nextPlacements = doc.artworkPlacements.filter((p) => p.artworkId !== artworkId);
+    const nextPlacements = doc.artworkPlacements.filter((p) => !removedPlacementIds.has(p.id));
+    const nextSceneOrder = doc.sceneOrder.filter(
+      (ref) => !(ref.kind === 'artwork' && removedPlacementIds.has(ref.id)),
+    );
     const nextActivePlacement =
       doc.activePlacementId && nextPlacements.some((p) => p.id === doc.activePlacementId)
         ? doc.activePlacementId
@@ -425,6 +627,7 @@ export const PaintDocument = {
       activeArtworkId: nextActiveArtwork,
       artworkPlacements: nextPlacements,
       activePlacementId: nextActivePlacement,
+      sceneOrder: nextSceneOrder,
       undoStack: pushUndoSnapshot(doc),
       redoStack: [],
     };
@@ -436,6 +639,7 @@ export const PaintDocument = {
       artworkPlacements: [...doc.artworkPlacements, placement],
       activePlacementId: placement.id,
       nextPlacementNumber: doc.nextPlacementNumber + 1,
+      sceneOrder: [{ kind: 'artwork', id: placement.id }, ...doc.sceneOrder],
       undoStack: pushUndoSnapshot(doc),
       redoStack: [],
     };
@@ -466,11 +670,29 @@ export const PaintDocument = {
     return doc.activePlacementId === placementId ? doc : { ...doc, activePlacementId: placementId };
   },
 
+  togglePlacementVisibility(doc: PaintDocumentState, placementId: string): PaintDocumentState {
+    const target = doc.artworkPlacements.find((p) => p.id === placementId);
+    if (!target) {
+      return doc;
+    }
+    return {
+      ...doc,
+      artworkPlacements: doc.artworkPlacements.map((p) =>
+        p.id === placementId ? { ...p, visible: !p.visible } : p,
+      ),
+      undoStack: pushUndoSnapshot(doc),
+      redoStack: [],
+    };
+  },
+
   removePlacement(doc: PaintDocumentState, placementId: string): PaintDocumentState {
     if (!doc.artworkPlacements.some((p) => p.id === placementId)) {
       return doc;
     }
     const nextPlacements = doc.artworkPlacements.filter((p) => p.id !== placementId);
+    const nextSceneOrder = doc.sceneOrder.filter(
+      (ref) => !(ref.kind === 'artwork' && ref.id === placementId),
+    );
     const nextActive =
       doc.activePlacementId === placementId
         ? (nextPlacements[nextPlacements.length - 1]?.id ?? null)
@@ -479,6 +701,36 @@ export const PaintDocument = {
       ...doc,
       artworkPlacements: nextPlacements,
       activePlacementId: nextActive,
+      sceneOrder: nextSceneOrder,
+      undoStack: pushUndoSnapshot(doc),
+      redoStack: [],
+    };
+  },
+
+  reorderSceneObject(
+    doc: PaintDocumentState,
+    fromIndex: number,
+    toIndex: number,
+  ): PaintDocumentState {
+    const count = doc.sceneOrder.length;
+    if (
+      fromIndex < 0 ||
+      fromIndex >= count ||
+      toIndex < 0 ||
+      toIndex >= count ||
+      fromIndex === toIndex
+    ) {
+      return doc;
+    }
+    const nextOrder = [...doc.sceneOrder];
+    const [moved] = nextOrder.splice(fromIndex, 1);
+    if (!moved) {
+      return doc;
+    }
+    nextOrder.splice(toIndex, 0, moved);
+    return {
+      ...doc,
+      sceneOrder: nextOrder,
       undoStack: pushUndoSnapshot(doc),
       redoStack: [],
     };
@@ -492,24 +744,10 @@ export const PaintDocument = {
     if (!prev) {
       return doc;
     }
-    const liveArtworkIds = new Set(doc.artworks.map((a) => a.id));
-    const validPlacements = prev.artworkPlacements.filter((p) => liveArtworkIds.has(p.artworkId));
-    const validActivePlacement =
-      prev.activePlacementId && validPlacements.some((p) => p.id === prev.activePlacementId)
-        ? prev.activePlacementId
-        : (validPlacements[validPlacements.length - 1]?.id ?? null);
-    return {
-      ...doc,
-      surfaces: prev.surfaces,
-      activeSurfaceId: prev.activeSurfaceId,
-      strokes: prev.strokes,
-      imageStrokes: prev.imageStrokes,
-      lastAnchorMode: prev.lastAnchorMode,
-      artworkPlacements: validPlacements,
-      activePlacementId: validActivePlacement,
-      undoStack: doc.undoStack.slice(0, -1),
-      redoStack: [...doc.redoStack, createSnapshot(doc)],
-    };
+    return restoreSnapshot(doc, prev, doc.undoStack.slice(0, -1), [
+      ...doc.redoStack,
+      createSnapshot(doc),
+    ]);
   },
 
   redo(doc: PaintDocumentState): PaintDocumentState {
@@ -520,24 +758,12 @@ export const PaintDocument = {
     if (!next) {
       return doc;
     }
-    const liveArtworkIds = new Set(doc.artworks.map((a) => a.id));
-    const validPlacements = next.artworkPlacements.filter((p) => liveArtworkIds.has(p.artworkId));
-    const validActivePlacement =
-      next.activePlacementId && validPlacements.some((p) => p.id === next.activePlacementId)
-        ? next.activePlacementId
-        : (validPlacements[validPlacements.length - 1]?.id ?? null);
-    return {
-      ...doc,
-      surfaces: next.surfaces,
-      activeSurfaceId: next.activeSurfaceId,
-      strokes: next.strokes,
-      imageStrokes: next.imageStrokes,
-      lastAnchorMode: next.lastAnchorMode,
-      artworkPlacements: validPlacements,
-      activePlacementId: validActivePlacement,
-      undoStack: [...doc.undoStack, createSnapshot(doc)],
-      redoStack: doc.redoStack.slice(0, -1),
-    };
+    return restoreSnapshot(
+      doc,
+      next,
+      [...doc.undoStack, createSnapshot(doc)],
+      doc.redoStack.slice(0, -1),
+    );
   },
 
   canUndo(doc: PaintDocumentState): boolean {
@@ -573,6 +799,46 @@ export const PaintDocument = {
     return doc.artworkPlacements.find((p) => p.id === doc.activePlacementId) ?? null;
   },
 
+  getActiveBrushObject(doc: PaintDocumentState): BrushObject | null {
+    if (!doc.activeBrushObjectId) {
+      return null;
+    }
+    return doc.brushObjects.find((b) => b.id === doc.activeBrushObjectId) ?? null;
+  },
+
+  getBrushObjectStrokeCount(doc: PaintDocumentState, brushObjectId: string): number {
+    let count = 0;
+    for (let i = 0; i < doc.strokes.length; i++) {
+      if (doc.strokes[i]?.brushObjectId === brushObjectId) count++;
+    }
+    for (let i = 0; i < doc.imageStrokes.length; i++) {
+      if (doc.imageStrokes[i]?.brushObjectId === brushObjectId) count++;
+    }
+    return count;
+  },
+
+  /** Returns visible/all placements ordered back-to-front matching sceneOrder (top of sceneOrder is at the end). */
+  getOrderedPlacementsBottomToTop(doc: PaintDocumentState): ArtworkPlacement[] {
+    const ordered: ArtworkPlacement[] = [];
+    const seen = new Set<string>();
+    for (let i = doc.sceneOrder.length - 1; i >= 0; i--) {
+      const ref = doc.sceneOrder[i];
+      if (!ref || ref.kind !== 'artwork') continue;
+      const found = doc.artworkPlacements.find((p) => p.id === ref.id);
+      if (found) {
+        ordered.push(found);
+        seen.add(found.id);
+      }
+    }
+    for (let i = 0; i < doc.artworkPlacements.length; i++) {
+      const pl = doc.artworkPlacements[i];
+      if (pl && !seen.has(pl.id)) {
+        ordered.push(pl);
+      }
+    }
+    return ordered;
+  },
+
   getActiveFootprint(doc: PaintDocumentState): PlaneFootprint | null {
     const active = PaintDocument.getActiveSurface(doc);
     return active ? getEffectiveFootprint(active) : null;
@@ -598,7 +864,15 @@ export const PaintDocument = {
     return PaintDocument.getEffectiveBrushSettingsForSurface(doc, active);
   },
 
-  getStrokesForSurface(doc: PaintDocumentState, surfaceId: string): BrushStroke[] {
-    return doc.strokes.filter((stroke) => stroke.surfaceId === surfaceId);
+  getStrokesForSurface(
+    doc: PaintDocumentState,
+    surfaceId: string,
+    brushObjectId?: string,
+  ): BrushStroke[] {
+    return doc.strokes.filter(
+      (stroke) =>
+        stroke.surfaceId === surfaceId &&
+        (brushObjectId === undefined || stroke.brushObjectId === brushObjectId),
+    );
   },
 };

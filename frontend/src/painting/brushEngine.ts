@@ -20,6 +20,7 @@ export interface BrushPoint {
 export interface BrushStroke {
   id: string;
   surfaceId: string;
+  brushObjectId?: string;
   mode?: BrushStrokeMode;
   brush: BrushSettings;
   points: BrushPoint[];

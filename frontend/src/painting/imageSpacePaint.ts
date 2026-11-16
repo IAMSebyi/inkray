@@ -22,6 +22,7 @@ export type ImagePaintLayerKind = 'curved' | 'fallback-2d';
 export interface ImageSpaceStroke {
   id: string;
   layer: ImagePaintLayerKind;
+  brushObjectId?: string;
   mode: BrushStrokeMode;
   brush: BrushSettings;
   layerWidth: number;

@@ -355,4 +355,126 @@ describe('PaintDocument & PlanarDecal', () => {
     expect(doc.artworkPlacements.length).toBe(3);
     expect(doc.artworkPlacements[2]?.mapping.type).toBe('curved');
   });
+
+  it('tracks separate brush objects and artwork placements in unified priority order with visibility, deletion, and undo/redo', () => {
+    const sel = createTestSelection();
+    const surface: PlanarDecalSurface = {
+      id: 'shared-wall',
+      label: 'Wall',
+      colorIndex: 0,
+      frame: sel.frame,
+      baseFootprint: sel.suggestedFootprint,
+      extentScale: 1,
+      supportMask: sel.supportMask,
+      inlierCount: sel.inlierCount,
+      rmsError: sel.rmsError,
+      referenceBrushDiameter: sel.referenceBrushDiameter,
+    };
+    const art = ArtworkModel.createBlank({ name: 'Banner', width: 64, height: 64 });
+    let doc = PaintDocument.createInitial();
+    doc = PaintDocument.addArtwork(doc, art);
+
+    // 1. First stroke automatically creates Brush 1 at sceneOrder[0].
+    doc = PaintDocument.commitAutoStroke(doc, {
+      anchorMode: 'planar',
+      newPlanarSurface: surface,
+      planarStroke: {
+        id: 'b1-s1',
+        surfaceId: surface.id,
+        mode: 'paint',
+        brush: { diameter: 0.2, color: '#ff0000', opacity: 1, hardness: 0.9 },
+        points: [{ u: 0, v: 0 }],
+      },
+    });
+    expect(doc.brushObjects.length).toBe(1);
+    const brush1Id = doc.brushObjects[0]?.id;
+    if (!brush1Id) throw new Error('Expected auto-created Brush 1');
+    expect(doc.activeBrushObjectId).toBe(brush1Id);
+    expect(doc.strokes[0]?.brushObjectId).toBe(brush1Id);
+    expect(doc.sceneOrder).toEqual([{ kind: 'brush', id: brush1Id }]);
+
+    // 2. Place two artworks onto the photo; newest sits at sceneOrder[0].
+    const p1 = createAutomaticArtworkPlacement({
+      artwork: art,
+      imagePoint: { x: 10, y: 10 },
+      imageSize: { width: 24, height: 24 },
+      geometry: null,
+      label: 'Banner #1',
+    });
+    const p2 = createAutomaticArtworkPlacement({
+      artwork: art,
+      imagePoint: { x: 14, y: 14 },
+      imageSize: { width: 24, height: 24 },
+      geometry: null,
+      label: 'Banner #2',
+    });
+    doc = PaintDocument.addPlacement(doc, p1);
+    doc = PaintDocument.addPlacement(doc, p2);
+
+    // 3. User creates a new Brush Object (#2) and paints onto the SAME wall surface on top.
+    doc = PaintDocument.createBrushObject(doc);
+    expect(doc.brushObjects.length).toBe(2);
+    const brush2Id = doc.activeBrushObjectId;
+    if (!brush2Id || brush2Id === brush1Id) throw new Error('Expected new Brush 2');
+
+    doc = PaintDocument.commitAutoStroke(doc, {
+      anchorMode: 'planar',
+      planarStroke: {
+        id: 'b2-s1',
+        surfaceId: surface.id,
+        mode: 'paint',
+        brush: { diameter: 0.2, color: '#00aaff', opacity: 1, hardness: 0.9 },
+        points: [{ u: 0.1, v: 0 }],
+      },
+    });
+
+    // Display priority stack top-to-bottom: [Brush 2, p2, p1, Brush 1].
+    expect(doc.sceneOrder).toEqual([
+      { kind: 'brush', id: brush2Id },
+      { kind: 'artwork', id: p2.id },
+      { kind: 'artwork', id: p1.id },
+      { kind: 'brush', id: brush1Id },
+    ]);
+    expect(PaintDocument.getStrokesForSurface(doc, surface.id, brush1Id).length).toBe(1);
+    expect(PaintDocument.getStrokesForSurface(doc, surface.id, brush2Id).length).toBe(1);
+
+    // 4. Drag Brush 2 behind p2 (index 0 -> index 1) and reorder p1 above p2 (index 2 -> index 0).
+    doc = PaintDocument.reorderSceneObject(doc, 0, 1);
+    expect(doc.sceneOrder).toEqual([
+      { kind: 'artwork', id: p2.id },
+      { kind: 'brush', id: brush2Id },
+      { kind: 'artwork', id: p1.id },
+      { kind: 'brush', id: brush1Id },
+    ]);
+    doc = PaintDocument.reorderSceneObject(doc, 2, 0);
+    expect(PaintDocument.getOrderedPlacementsBottomToTop(doc).map((p) => p.id)).toEqual([
+      p2.id,
+      p1.id,
+    ]);
+
+    // Undo restores placement hit-test order, redo puts p1 back on top.
+    doc = PaintDocument.undo(doc);
+    expect(PaintDocument.getOrderedPlacementsBottomToTop(doc).map((p) => p.id)).toEqual([
+      p1.id,
+      p2.id,
+    ]);
+    doc = PaintDocument.redo(doc);
+    expect(PaintDocument.getOrderedPlacementsBottomToTop(doc).map((p) => p.id)).toEqual([
+      p2.id,
+      p1.id,
+    ]);
+
+    // 5. Toggle visibility and remove Brush 2 cleanly without affecting Brush 1's stroke.
+    doc = PaintDocument.toggleBrushObjectVisibility(doc, brush1Id);
+    doc = PaintDocument.togglePlacementVisibility(doc, p1.id);
+    expect(doc.brushObjects.find((b) => b.id === brush1Id)?.visible).toBe(false);
+    expect(doc.artworkPlacements.find((p) => p.id === p1.id)?.visible).toBe(false);
+
+    doc = PaintDocument.removeBrushObject(doc, brush2Id);
+    expect(doc.brushObjects.some((b) => b.id === brush2Id)).toBe(false);
+    expect(PaintDocument.getStrokesForSurface(doc, surface.id, brush1Id).length).toBe(1);
+
+    doc = PaintDocument.undo(doc);
+    expect(PaintDocument.getStrokesForSurface(doc, surface.id, brush2Id).length).toBe(1);
+  });
 });
