@@ -2,7 +2,19 @@ import * as THREE from 'three';
 import { getImageBoundsInViewport } from '../editor/viewportTransforms';
 import { parseNormalizedIntrinsics } from '../geometry/geometryAccess';
 import type { PlaneFootprint } from '../geometry/planeFrame';
-import type { GeometryData, LoadedImage, Size2D, ViewportTransform } from '../types/editor';
+import type {
+  AppearanceData,
+  GeometryData,
+  LoadedImage,
+  PaintMode,
+  Size2D,
+  ViewportTransform,
+} from '../types/editor';
+import {
+  DEFAULT_MAX_CALIBRATED_SHADING,
+  type ShadingCalibrationResult,
+  calibrateShadingScale,
+} from './colorSpace';
 import {
   type BrushStroke,
   type DirtyTexelBounds,
@@ -72,11 +84,24 @@ void main() {
 `;
 
 const DECAL_FRAGMENT_SHADER = `
+uniform sampler2D uRgbTex;
+uniform sampler2D uSupportTex;
 uniform sampler2D uDepthTex;
 uniform sampler2D uMaskTex;
 uniform sampler2D uNormalsTex;
 uniform sampler2D uOwnerTex;
 uniform sampler2D uDecalTex;
+uniform sampler2D uAlbedoTex;
+uniform sampler2D uShadingTex;
+uniform float uIsPng;
+uniform float uCompositeChecker;
+uniform float uShowSupport;
+uniform vec2 uImageCssSize;
+uniform vec2 uAppearanceSize;
+uniform int uEffectivePaintMode;
+uniform float uShadingScale;
+uniform float uMaxCalibratedShading;
+uniform float uTexturePreservation;
 uniform float uHasNormals;
 uniform float uShowFootprint;
 uniform float uUseOwnerMask;
@@ -99,6 +124,79 @@ varying vec2 vUv;
 float computeScaleAwareTol(float zPlane) {
   float baseTol = max(uDepthTolRatio * zPlane, 2.5 * uFitRms);
   return clamp(baseTol, 0.015 * zPlane, 0.14 * zPlane);
+}
+
+vec3 srgbToLinearVec3(vec3 c) {
+  vec3 x = clamp(c, 0.0, 1.0);
+  vec3 low = x / 12.92;
+  vec3 high = pow((x + vec3(0.055)) / 1.055, vec3(2.4));
+  return vec3(
+    x.r <= 0.04045 ? low.r : high.r,
+    x.g <= 0.04045 ? low.g : high.g,
+    x.b <= 0.04045 ? low.b : high.b
+  );
+}
+
+vec3 linearToSrgbVec3(vec3 c) {
+  vec3 x = clamp(c, 0.0, 1.0);
+  vec3 low = x * 12.92;
+  vec3 high = vec3(1.055) * pow(max(x, vec3(0.0)), vec3(1.0 / 2.4)) - vec3(0.055);
+  return clamp(vec3(
+    x.r <= 0.0031308 ? low.r : high.r,
+    x.g <= 0.0031308 ? low.g : high.g,
+    x.b <= 0.0031308 ? low.b : high.b
+  ), 0.0, 1.0);
+}
+
+vec3 sampleBilinearFloat3(sampler2D tex, vec2 uvImg, vec2 texSize) {
+  vec2 clampedUv = clamp(uvImg, vec2(0.0), vec2(1.0));
+  vec2 pos = clampedUv * texSize - vec2(0.5);
+  vec2 baseIdx = floor(pos);
+  vec2 f = clamp(pos - baseIdx, vec2(0.0), vec2(1.0));
+  vec2 maxIdx = max(texSize - vec2(1.0), vec2(0.0));
+  vec2 idx0 = clamp(baseIdx, vec2(0.0), maxIdx);
+  vec2 idx1 = clamp(baseIdx + vec2(1.0), vec2(0.0), maxIdx);
+  vec2 invSize = 1.0 / max(texSize, vec2(1.0));
+
+  vec3 c00 = texture2D(tex, (vec2(idx0.x, idx0.y) + 0.5) * invSize).rgb;
+  vec3 c10 = texture2D(tex, (vec2(idx1.x, idx0.y) + 0.5) * invSize).rgb;
+  vec3 c01 = texture2D(tex, (vec2(idx0.x, idx1.y) + 0.5) * invSize).rgb;
+  vec3 c11 = texture2D(tex, (vec2(idx1.x, idx1.y) + 0.5) * invSize).rgb;
+  return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
+}
+
+vec3 sampleAlbedoSmooth5x5(sampler2D tex, vec2 uvImg, vec2 texSize, vec3 centerAlb) {
+  float stepPx = max(1.0, floor(min(texSize.x, texSize.y) / 40.0));
+  vec2 invSize = stepPx / max(texSize, vec2(1.0));
+  vec3 sumAlb = vec3(0.0);
+  float sumW = 0.0;
+  for (int dy = -2; dy <= 2; dy++) {
+    for (int dx = -2; dx <= 2; dx++) {
+      vec2 offUv = clamp(uvImg + vec2(float(dx), float(dy)) * invSize, vec2(0.0), vec2(1.0));
+      vec3 nbr = clamp(sampleBilinearFloat3(tex, offUv, texSize), 0.0, 1.0);
+      vec3 d = nbr - centerAlb;
+      float w = exp(-dot(d, d) / 0.25);
+      sumAlb += nbr * w;
+      sumW += w;
+    }
+  }
+  return sumAlb / max(sumW, 1e-4);
+}
+
+vec4 computeBasePixel() {
+  vec4 base = texture2D(uRgbTex, vUv);
+  vec4 outColor = base;
+  if (uCompositeChecker > 0.5 && uIsPng > 0.5 && base.a < 0.999) {
+    vec2 px = vUv * uImageCssSize;
+    float cx = floor(px.x / 8.0);
+    float cy = floor(px.y / 8.0);
+    float tile = mod(cx + cy, 2.0);
+    vec3 c0 = vec3(0.106, 0.114, 0.137);
+    vec3 c1 = vec3(0.141, 0.157, 0.192);
+    vec3 checker = mix(c0, c1, tile);
+    outColor = vec4(mix(checker, base.rgb, base.a), 1.0);
+  }
+  return outColor;
 }
 
 void main() {
@@ -173,39 +271,77 @@ void main() {
     }
   }
 
-  vec4 outColor = vec4(0.0);
-
+  float paintAlpha = 0.0;
+  vec3 paintRgb = vec3(0.0);
   if (uHasDecalPaint > 0.5 && visibility > 0.001) {
     // Decal DataTexture uses flipY = false so row 0 (minV) maps directly to decalCoord.y = 0.
     vec4 paint = texture2D(uDecalTex, decalCoord);
-    float a = paint.a * visibility;
-    if (a > 0.001) {
-      outColor = vec4(paint.rgb, a);
-    }
+    paintAlpha = paint.a * visibility;
+    paintRgb = paint.rgb;
   }
 
+  bool showBorder = false;
+  bool showTint = false;
   if (uShowFootprint > 0.5) {
     float minSpan = min(spanU, spanV);
     float borderU = min(decalCoord.x, 1.0 - decalCoord.x) * (spanU / minSpan);
     float borderV = min(decalCoord.y, 1.0 - decalCoord.y) * (spanV / minSpan);
-    float edgeDist = min(borderU, borderV);
-    if (edgeDist < 0.014) {
-      float lineAlpha = visibility > 0.5 ? 0.85 : 0.25;
-      vec3 lineCol = visibility > 0.5 ? uSurfaceAccent : vec3(0.85, 0.65, 0.25);
-      float combinedA = lineAlpha + outColor.a * (1.0 - lineAlpha);
-      vec3 combinedRgb = combinedA > 1e-4
-        ? (lineCol * lineAlpha + outColor.rgb * outColor.a * (1.0 - lineAlpha)) / combinedA
-        : lineCol;
-      outColor = vec4(combinedRgb, combinedA);
-    } else if (outColor.a < 0.001 && visibility > 0.5) {
-      outColor = vec4(uSurfaceAccent, 0.06);
+    if (min(borderU, borderV) < 0.014) {
+      showBorder = true;
+    } else if (paintAlpha <= 0.001 && visibility > 0.5) {
+      showTint = true;
     }
   }
 
-  if (outColor.a <= 0.001) {
+  if (paintAlpha <= 0.001 && !showBorder && !showTint) {
     discard;
   }
-  gl_FragColor = vec4(outColor.rgb * outColor.a, outColor.a);
+
+  vec4 origColor = computeBasePixel();
+  vec3 finalRgb = origColor.rgb;
+  float finalAlpha = origColor.a;
+
+  if (paintAlpha > 0.001) {
+    if (uEffectivePaintMode == 0) {
+      finalRgb = mix(origColor.rgb, paintRgb, paintAlpha);
+    } else {
+      vec3 origLin = srgbToLinearVec3(origColor.rgb);
+      vec3 paintLin = srgbToLinearVec3(paintRgb);
+      vec3 alb = clamp(sampleBilinearFloat3(uAlbedoTex, uvImg, uAppearanceSize), 0.0, 1.0);
+      vec3 shdRaw = max(sampleBilinearFloat3(uShadingTex, uvImg, uAppearanceSize), vec3(0.0));
+      vec3 sCal = min(shdRaw * uShadingScale, vec3(uMaxCalibratedShading));
+
+      vec3 targetAlb = paintLin;
+      if (uEffectivePaintMode == 2 && uTexturePreservation > 0.001) {
+        vec3 albSmooth = sampleAlbedoSmooth5x5(uAlbedoTex, uvImg, uAppearanceSize, alb);
+        vec3 detail = clamp(alb / max(albSmooth, vec3(0.05)), 0.5, 1.5);
+        targetAlb = clamp(paintLin * mix(vec3(1.0), detail, clamp(uTexturePreservation, 0.0, 1.0)), 0.0, 1.0);
+      }
+
+      vec3 outLin = clamp(origLin + paintAlpha * sCal * (targetAlb - alb), 0.0, 1.0);
+      finalRgb = linearToSrgbVec3(outLin);
+    }
+    finalAlpha = max(origColor.a, paintAlpha);
+  }
+
+  if (uShowSupport > 0.5) {
+    vec4 sup = texture2D(uSupportTex, uvImg);
+    if (sup.a > 0.01) {
+      finalRgb = mix(finalRgb, sup.rgb, (1.0 - paintAlpha) * sup.a * 0.28);
+    }
+  }
+
+  if (showBorder) {
+    float lineAlpha = visibility > 0.5 ? 0.85 : 0.25;
+    vec3 lineCol = visibility > 0.5 ? uSurfaceAccent : vec3(0.85, 0.65, 0.25);
+    finalRgb = mix(finalRgb, lineCol, lineAlpha);
+    finalAlpha = max(finalAlpha, lineAlpha);
+  } else if (showTint) {
+    finalRgb = mix(finalRgb, uSurfaceAccent, 0.06);
+    finalAlpha = max(finalAlpha, 0.06);
+  }
+
+  gl_FragColor = vec4(finalRgb * finalAlpha, finalAlpha);
 }
 `;
 
@@ -312,11 +448,24 @@ export class PlanarPaintRenderer {
   private readonly uBaseImageCssSize = new THREE.Uniform(new THREE.Vector2(1, 1));
 
   private readonly uDecalQuadTransform = new THREE.Uniform(new THREE.Vector4(1, 1, 0, 0));
+  private readonly uDecalRgbTex = new THREE.Uniform<THREE.Texture>(this.fallbackTex);
+  private readonly uDecalSupportTex = new THREE.Uniform<THREE.Texture>(this.fallbackTex);
   private readonly uDecalDepthTex = new THREE.Uniform<THREE.Texture>(this.fallbackTex);
   private readonly uDecalMaskTex = new THREE.Uniform<THREE.Texture>(this.fallbackTex);
   private readonly uDecalNormalsTex = new THREE.Uniform<THREE.Texture>(this.fallbackTex);
   private readonly uDecalOwnerTex = new THREE.Uniform<THREE.Texture>(this.fallbackTex);
   private readonly uDecalPaintTex = new THREE.Uniform<THREE.Texture>(this.fallbackTex);
+  private readonly uDecalAlbedoTex = new THREE.Uniform<THREE.Texture>(this.fallbackTex);
+  private readonly uDecalShadingTex = new THREE.Uniform<THREE.Texture>(this.fallbackTex);
+  private readonly uDecalIsPng = new THREE.Uniform(0);
+  private readonly uDecalCompositeChecker = new THREE.Uniform(1);
+  private readonly uDecalShowSupport = new THREE.Uniform(0);
+  private readonly uDecalImageCssSize = new THREE.Uniform(new THREE.Vector2(1, 1));
+  private readonly uDecalAppearanceSize = new THREE.Uniform(new THREE.Vector2(1, 1));
+  private readonly uDecalEffectivePaintMode = new THREE.Uniform(0);
+  private readonly uDecalShadingScale = new THREE.Uniform(1.0);
+  private readonly uDecalMaxCalibratedShading = new THREE.Uniform(DEFAULT_MAX_CALIBRATED_SHADING);
+  private readonly uDecalTexturePreservation = new THREE.Uniform(0.75);
   private readonly uDecalHasNormals = new THREE.Uniform(0);
   private readonly uDecalShowFootprint = new THREE.Uniform(0);
   private readonly uDecalUseOwnerMask = new THREE.Uniform(0);
@@ -343,6 +492,13 @@ export class PlanarPaintRenderer {
   private normalsTex: THREE.DataTexture | null = null;
   private geometryWidth = 0;
   private geometryHeight = 0;
+
+  private uploadedAppearanceId: string | null = null;
+  private albedoTex: THREE.DataTexture | null = null;
+  private shadingTex: THREE.DataTexture | null = null;
+  private appearanceWidth = 0;
+  private appearanceHeight = 0;
+  private readonly surfaceCalibrations = new Map<string, ShadingCalibrationResult>();
 
   private uploadedOwnerKey: string | null = null;
   private cachedOwnerGrid: Uint8Array | null = null;
@@ -395,21 +551,28 @@ export class PlanarPaintRenderer {
       fragmentShader: DECAL_FRAGMENT_SHADER,
       depthTest: false,
       depthWrite: false,
-      transparent: true,
-      blending: THREE.CustomBlending,
-      blendEquation: THREE.AddEquation,
-      blendSrc: THREE.OneFactor,
-      blendDst: THREE.OneMinusSrcAlphaFactor,
-      blendEquationAlpha: THREE.AddEquation,
-      blendSrcAlpha: THREE.OneFactor,
-      blendDstAlpha: THREE.OneMinusSrcAlphaFactor,
+      transparent: false,
+      blending: THREE.NoBlending,
       uniforms: {
         uQuadTransform: this.uDecalQuadTransform,
+        uRgbTex: this.uDecalRgbTex,
+        uSupportTex: this.uDecalSupportTex,
         uDepthTex: this.uDecalDepthTex,
         uMaskTex: this.uDecalMaskTex,
         uNormalsTex: this.uDecalNormalsTex,
         uOwnerTex: this.uDecalOwnerTex,
         uDecalTex: this.uDecalPaintTex,
+        uAlbedoTex: this.uDecalAlbedoTex,
+        uShadingTex: this.uDecalShadingTex,
+        uIsPng: this.uDecalIsPng,
+        uCompositeChecker: this.uDecalCompositeChecker,
+        uShowSupport: this.uDecalShowSupport,
+        uImageCssSize: this.uDecalImageCssSize,
+        uAppearanceSize: this.uDecalAppearanceSize,
+        uEffectivePaintMode: this.uDecalEffectivePaintMode,
+        uShadingScale: this.uDecalShadingScale,
+        uMaxCalibratedShading: this.uDecalMaxCalibratedShading,
+        uTexturePreservation: this.uDecalTexturePreservation,
         uHasNormals: this.uDecalHasNormals,
         uShowFootprint: this.uDecalShowFootprint,
         uUseOwnerMask: this.uDecalUseOwnerMask,
@@ -536,6 +699,95 @@ export class PlanarPaintRenderer {
     this.uploadedOwnerKey = null;
     this.cachedOwnerGrid = null;
     this.uploadedSupportKey = null;
+    this.surfaceCalibrations.clear();
+  }
+
+  private createFloatRgbTexture(
+    rgb: Float32Array,
+    width: number,
+    height: number,
+    clampUnit: boolean,
+  ): THREE.DataTexture {
+    const pixelCount = width * height;
+    const rgba = new Float32Array(pixelCount * 4);
+    for (let i = 0; i < pixelCount; i++) {
+      const src = i * 3;
+      const dst = i * 4;
+      const rRaw = rgb[src] ?? 0;
+      const gRaw = rgb[src + 1] ?? 0;
+      const bRaw = rgb[src + 2] ?? 0;
+      const r = Number.isFinite(rRaw) ? Math.max(0, rRaw) : 0;
+      const g = Number.isFinite(gRaw) ? Math.max(0, gRaw) : 0;
+      const b = Number.isFinite(bRaw) ? Math.max(0, bRaw) : 0;
+      rgba[dst] = clampUnit ? Math.min(1, r) : r;
+      rgba[dst + 1] = clampUnit ? Math.min(1, g) : g;
+      rgba[dst + 2] = clampUnit ? Math.min(1, b) : b;
+      rgba[dst + 3] = 1;
+    }
+
+    const tex = new THREE.DataTexture(rgba, width, height, THREE.RGBAFormat, THREE.FloatType);
+    tex.colorSpace = THREE.NoColorSpace;
+    tex.flipY = false;
+    tex.unpackAlignment = 4;
+    tex.minFilter = THREE.NearestFilter;
+    tex.magFilter = THREE.NearestFilter;
+    tex.wrapS = THREE.ClampToEdgeWrapping;
+    tex.wrapT = THREE.ClampToEdgeWrapping;
+    tex.needsUpdate = true;
+    return tex;
+  }
+
+  private ensureAppearanceUploaded(appearance: AppearanceData | null): void {
+    const nextId = appearance?.metadata.id ?? null;
+    if (this.uploadedAppearanceId === nextId) {
+      return;
+    }
+
+    this.albedoTex?.dispose();
+    this.shadingTex?.dispose();
+    this.albedoTex = null;
+    this.shadingTex = null;
+    this.appearanceWidth = 0;
+    this.appearanceHeight = 0;
+    this.surfaceCalibrations.clear();
+    this.uploadedAppearanceId = nextId;
+
+    if (!appearance) {
+      return;
+    }
+
+    const w = appearance.metadata.appearance_width;
+    const h = appearance.metadata.appearance_height;
+    this.albedoTex = this.createFloatRgbTexture(appearance.albedo, w, h, true);
+    this.shadingTex = this.createFloatRgbTexture(appearance.shading, w, h, false);
+    this.appearanceWidth = w;
+    this.appearanceHeight = h;
+  }
+
+  private getSurfaceCalibration(
+    surface: PlanarDecalSurface,
+    geometry: GeometryData,
+    appearance: AppearanceData,
+  ): ShadingCalibrationResult {
+    const key = `${appearance.metadata.id}|${surface.id}`;
+    const cached = this.surfaceCalibrations.get(key);
+    if (cached) {
+      return cached;
+    }
+
+    const calibration = calibrateShadingScale({
+      linearReference: appearance.linearReference,
+      albedo: appearance.albedo,
+      shading: appearance.shading,
+      residual: appearance.residual,
+      appearanceWidth: appearance.metadata.appearance_width,
+      appearanceHeight: appearance.metadata.appearance_height,
+      supportMask: surface.supportMask,
+      supportWidth: geometry.metadata.inference_width,
+      supportHeight: geometry.metadata.inference_height,
+    });
+    this.surfaceCalibrations.set(key, calibration);
+    return calibration;
   }
 
   private ensureOwnerUploaded(geometry: GeometryData, doc: PaintDocumentState): void {
@@ -785,9 +1037,27 @@ export class PlanarPaintRenderer {
     return { entry, hasPaint };
   }
 
+  private resolveEffectiveModeCode(
+    paintMode: PaintMode,
+    appearance: AppearanceData | null,
+    calibration: ShadingCalibrationResult | null,
+  ): number {
+    if (
+      paintMode === 'flat' ||
+      !appearance ||
+      !this.albedoTex ||
+      !this.shadingTex ||
+      !calibration?.isReliable
+    ) {
+      return 0;
+    }
+    return paintMode === 'texture' ? 2 : 1;
+  }
+
   private renderScenePasses(
     image: LoadedImage,
     geometry: GeometryData,
+    appearance: AppearanceData | null,
     doc: PaintDocumentState,
     pendingStrokes: readonly BrushStroke[],
     activeStroke: BrushStroke | null,
@@ -797,6 +1067,7 @@ export class PlanarPaintRenderer {
   ): void {
     this.ensureImageUploaded(image);
     this.ensureGeometryUploaded(geometry);
+    this.ensureAppearanceUploaded(appearance);
     this.ensureOwnerUploaded(geometry, doc);
 
     const showSupport = !isExport && doc.showSupportOverlay && doc.surfaces.length > 0;
@@ -819,10 +1090,24 @@ export class PlanarPaintRenderer {
 
     const intr = parseNormalizedIntrinsics(geometry.metadata.intrinsics);
     this.uDecalQuadTransform.value.set(...quadTransform);
+    this.uDecalRgbTex.value = this.rgbTex ?? this.fallbackTex;
+    this.uDecalSupportTex.value =
+      showSupport && this.supportTex ? this.supportTex : this.fallbackTex;
     this.uDecalDepthTex.value = this.depthTex ?? this.fallbackTex;
     this.uDecalMaskTex.value = this.maskTex ?? this.fallbackTex;
     this.uDecalNormalsTex.value = this.normalsTex ?? this.fallbackTex;
     this.uDecalOwnerTex.value = this.ownerTex ?? this.fallbackTex;
+    this.uDecalAlbedoTex.value = this.albedoTex ?? this.fallbackTex;
+    this.uDecalShadingTex.value = this.shadingTex ?? this.fallbackTex;
+    this.uDecalIsPng.value = this.rgbIsPng ? 1 : 0;
+    this.uDecalCompositeChecker.value = isExport ? 0 : 1;
+    this.uDecalShowSupport.value = showSupport ? 1 : 0;
+    this.uDecalImageCssSize.value.set(...imageCssSize);
+    this.uDecalAppearanceSize.value.set(
+      Math.max(1, this.appearanceWidth),
+      Math.max(1, this.appearanceHeight),
+    );
+    this.uDecalTexturePreservation.value = doc.texturePreservation;
     this.uDecalHasNormals.value = this.normalsTex ? 1 : 0;
     this.uDecalUseOwnerMask.value = doc.surfaces.length > 0 && this.ownerTex ? 1 : 0;
     this.uDecalIntrinsics0.value.set(intr.fx, intr.skew, intr.cx, intr.fy);
@@ -852,6 +1137,17 @@ export class PlanarPaintRenderer {
       if (!hasPaint && !showFootprint) {
         continue;
       }
+
+      const calibration =
+        appearance && doc.paintMode !== 'flat'
+          ? this.getSurfaceCalibration(surface, geometry, appearance)
+          : null;
+      this.uDecalEffectivePaintMode.value = this.resolveEffectiveModeCode(
+        doc.paintMode,
+        appearance,
+        calibration,
+      );
+      this.uDecalShadingScale.value = calibration?.scale ?? 1.0;
 
       const accent = getSurfaceAccentColor(surface.colorIndex);
       this.uDecalPaintTex.value = entry.texture;
@@ -885,6 +1181,7 @@ export class PlanarPaintRenderer {
     image: LoadedImage;
     transform: ViewportTransform;
     geometry: GeometryData;
+    appearance?: AppearanceData | null;
     paintDoc: PaintDocumentState;
     pendingStrokes?: readonly BrushStroke[];
     activeStroke: BrushStroke | null;
@@ -898,6 +1195,7 @@ export class PlanarPaintRenderer {
       image,
       transform,
       geometry,
+      appearance = null,
       paintDoc,
       pendingStrokes = [],
       activeStroke,
@@ -934,6 +1232,7 @@ export class PlanarPaintRenderer {
     this.renderScenePasses(
       image,
       geometry,
+      appearance,
       paintDoc,
       pendingStrokes,
       activeStroke,
@@ -946,13 +1245,14 @@ export class PlanarPaintRenderer {
   async exportPngBlob(params: {
     image: LoadedImage;
     geometry: GeometryData;
+    appearance?: AppearanceData | null;
     paintDoc: PaintDocumentState;
   }): Promise<Blob> {
     if (this.disposed) {
       throw new Error('Renderer has been disposed.');
     }
 
-    const { image, geometry, paintDoc } = params;
+    const { image, geometry, appearance = null, paintDoc } = params;
     const width = image.metadata.width;
     const height = image.metadata.height;
     const gl = this.renderer.getContext();
@@ -994,6 +1294,7 @@ export class PlanarPaintRenderer {
       this.renderScenePasses(
         image,
         geometry,
+        appearance,
         paintDoc,
         [],
         null,
@@ -1048,6 +1349,9 @@ export class PlanarPaintRenderer {
     this.depthTex?.dispose();
     this.maskTex?.dispose();
     this.normalsTex?.dispose();
+    this.albedoTex?.dispose();
+    this.shadingTex?.dispose();
+    this.surfaceCalibrations.clear();
     this.ownerTex?.dispose();
     this.supportTex?.dispose();
     this.fallbackTex.dispose();

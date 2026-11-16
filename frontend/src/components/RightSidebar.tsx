@@ -12,14 +12,30 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { computeFovYDegrees } from '../editor/pointCloudBuilder';
 import { useEditor } from '../hooks/useEditor';
+import { calibrateShadingScale } from '../painting/colorSpace';
 import { PaintDocument } from '../painting/paintDocument';
 import { getEffectiveFootprint, getSurfaceAccentColor } from '../painting/planarDecal';
+import type { PaintMode } from '../types/editor';
 import { formatAspectRatio, formatDimensions, formatFileSize } from '../utils/format';
 
 type SidebarTab = 'inspector' | 'surfaces';
+
+const PAINT_MODE_OPTIONS: Array<{ mode: PaintMode; label: string; title: string }> = [
+  { mode: 'flat', label: 'Flat', title: 'Classic perspective paint without lighting modulation' },
+  {
+    mode: 'shading',
+    label: 'Shading',
+    title: 'Blend paint using estimated surface diffuse illumination',
+  },
+  {
+    mode: 'texture',
+    label: 'Texture',
+    title: 'Preserve both diffuse illumination and fine surface texture',
+  },
+];
 
 export function RightSidebar() {
   const {
@@ -27,12 +43,16 @@ export function RightSidebar() {
     openFilePicker,
     generateGeometry,
     cancelGeometry,
+    generateAppearance,
+    cancelAppearance,
     setActiveTool,
     setActiveSurface,
     removeSurface,
     reorderSurfaces,
     setFootprintExtent,
     setBrushConfig,
+    setPaintMode,
+    setTexturePreservation,
     setPaintOverlayOptions,
   } = useEditor();
 
@@ -43,6 +63,8 @@ export function RightSidebar() {
   const metadata = state.image?.metadata ?? null;
   const geometry = state.geometry.data;
   const geometryStatus = state.geometry.status;
+  const appearance = state.appearance.data;
+  const appearanceStatus = state.appearance.status;
 
   const surfaces = state.paint.surfaces;
   const activeSurface = PaintDocument.getActiveSurface(state.paint);
@@ -87,6 +109,36 @@ export function RightSidebar() {
     geometryBadge = 'Error';
     geometryBadgeClass = 'inspector-badge inspector-badge-danger';
   }
+
+  let appearanceBadge = 'Idle';
+  let appearanceBadgeClass = 'inspector-badge inspector-badge-muted';
+  if (appearanceStatus === 'loading') {
+    appearanceBadge = 'Running';
+    appearanceBadgeClass = 'inspector-badge inspector-badge-accent';
+  } else if (appearanceStatus === 'ready' && appearance) {
+    appearanceBadge = appearance.metadata.cached ? 'Cached' : 'Ready';
+    appearanceBadgeClass = 'inspector-badge';
+  } else if (appearanceStatus === 'error') {
+    appearanceBadge = 'Error';
+    appearanceBadgeClass = 'inspector-badge inspector-badge-danger';
+  }
+
+  const activeSurfaceCalibration = useMemo(() => {
+    if (!appearance || !geometry || !activeSurface) {
+      return null;
+    }
+    return calibrateShadingScale({
+      linearReference: appearance.linearReference,
+      albedo: appearance.albedo,
+      shading: appearance.shading,
+      residual: appearance.residual,
+      appearanceWidth: appearance.metadata.appearance_width,
+      appearanceHeight: appearance.metadata.appearance_height,
+      supportMask: activeSurface.supportMask,
+      supportWidth: geometry.metadata.inference_width,
+      supportHeight: geometry.metadata.inference_height,
+    });
+  }, [appearance, geometry, activeSurface]);
 
   const totalInferencePixels = geometry
     ? geometry.metadata.inference_width * geometry.metadata.inference_height
@@ -712,18 +764,167 @@ export function RightSidebar() {
             )}
           </section>
 
-          <section className="inspector-section inspector-section-planned">
+          <section className="inspector-section">
             <div className="inspector-header">
               <h2 className="inspector-title">
                 <SunMedium size={13} strokeWidth={1.75} />
                 <span>Intrinsic Lighting</span>
               </h2>
-              <span className="inspector-badge inspector-badge-muted">Planned</span>
+              <span className={appearanceBadgeClass}>{appearanceBadge}</span>
             </div>
-            <p className="inspector-planned-note">
-              Albedo, shading, and residual decomposition controls (Marigold IID) are not
-              implemented yet.
-            </p>
+
+            {!metadata ? (
+              <p className="inspector-empty-note">
+                Import an image first to estimate intrinsic albedo, diffuse shading, and residual
+                layers for lighting-aware compositing.
+              </p>
+            ) : (
+              <div className="inspector-content">
+                {appearanceStatus === 'error' && state.appearance.error && (
+                  <p className="inspector-error-note" role="alert">
+                    {state.appearance.error}
+                  </p>
+                )}
+
+                {appearanceStatus === 'loading' && (
+                  <p className="inspector-empty-note">
+                    Running Marigold IID Lighting on the backend. This may briefly offload other GPU
+                    models to stay within VRAM limits.
+                  </p>
+                )}
+
+                {appearance && (
+                  <dl className="metadata-grid">
+                    <dt>Model</dt>
+                    <dd className="mono" title={appearance.metadata.model_id}>
+                      {appearance.metadata.model_id}
+                    </dd>
+
+                    <dt>Source</dt>
+                    <dd className="mono">
+                      {appearance.metadata.cached ? 'Disk cache' : 'Inferred'}
+                    </dd>
+
+                    <dt>Resolution</dt>
+                    <dd className="mono">
+                      {formatDimensions(
+                        appearance.metadata.appearance_width,
+                        appearance.metadata.appearance_height,
+                      )}
+                    </dd>
+
+                    <dt>Space</dt>
+                    <dd className="mono">{appearance.metadata.prediction_space}</dd>
+
+                    <dt>Shading Scale</dt>
+                    <dd className="mono">
+                      {activeSurfaceCalibration
+                        ? activeSurfaceCalibration.isReliable
+                          ? `${activeSurfaceCalibration.scale.toFixed(2)}x`
+                          : 'Fallback (Flat)'
+                        : 'Select surface'}
+                    </dd>
+                  </dl>
+                )}
+
+                <div className="inspector-controls-stack">
+                  <div className="inspector-control-row">
+                    <span className="inspector-control-header">
+                      <span>Paint Compositing</span>
+                      <span className="mono">
+                        {!appearance && state.paint.paintMode !== 'flat'
+                          ? `${state.paint.paintMode} (awaiting maps)`
+                          : state.paint.paintMode}
+                      </span>
+                    </span>
+                    <div
+                      className="segmented-control sidebar-mode-control"
+                      role="group"
+                      aria-label="Paint compositing mode"
+                    >
+                      {PAINT_MODE_OPTIONS.map((option) => (
+                        <button
+                          key={option.mode}
+                          type="button"
+                          className={`sidebar-mode-button ${
+                            state.paint.paintMode === option.mode ? 'is-active' : ''
+                          }`}
+                          onClick={(e) => {
+                            e.currentTarget.blur();
+                            setPaintMode(option.mode);
+                          }}
+                          title={option.title}
+                        >
+                          {option.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {state.paint.paintMode === 'texture' && (
+                    <label className="inspector-control-row">
+                      <span className="inspector-control-header">
+                        <span>Texture Detail</span>
+                        <span className="mono">
+                          {Math.round(state.paint.texturePreservation * 100)}%
+                        </span>
+                      </span>
+                      <input
+                        type="range"
+                        className="inspector-range"
+                        min={0.0}
+                        max={1.0}
+                        step={0.05}
+                        value={state.paint.texturePreservation}
+                        onChange={(e) => setTexturePreservation(parseFloat(e.target.value))}
+                      />
+                    </label>
+                  )}
+
+                  {activeSurfaceCalibration &&
+                    !activeSurfaceCalibration.isReliable &&
+                    state.paint.paintMode !== 'flat' && (
+                      <p className="inspector-empty-note">
+                        Active surface has low diffuse signal; compositing automatically falls back
+                        to Flat Paint.
+                      </p>
+                    )}
+                </div>
+
+                {appearanceStatus === 'loading' ? (
+                  <button
+                    type="button"
+                    className="sidebar-action-button toolbar-button-busy"
+                    onClick={(e) => {
+                      e.currentTarget.blur();
+                      cancelAppearance();
+                    }}
+                  >
+                    <X size={13} strokeWidth={1.75} />
+                    <span>Cancel Appearance</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="sidebar-action-button"
+                    onClick={(e) => {
+                      e.currentTarget.blur();
+                      void generateAppearance();
+                    }}
+                    disabled={state.isLoading}
+                  >
+                    <SunMedium size={13} strokeWidth={1.75} />
+                    <span>
+                      {appearanceStatus === 'error'
+                        ? 'Retry Appearance'
+                        : appearance
+                          ? 'Regenerate Appearance'
+                          : 'Generate Appearance'}
+                    </span>
+                  </button>
+                )}
+              </div>
+            )}
           </section>
 
           <section className="inspector-section inspector-section-planned">

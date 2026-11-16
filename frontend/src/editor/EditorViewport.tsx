@@ -96,6 +96,7 @@ export function EditorViewport({
     viewMode: state.viewMode,
     activeTool: state.activeTool,
     geometry: state.geometry.data,
+    appearance: state.appearance.data,
     paint: state.paint,
     isPanning,
   });
@@ -107,6 +108,7 @@ export function EditorViewport({
     viewMode: state.viewMode,
     activeTool: state.activeTool,
     geometry: state.geometry.data,
+    appearance: state.appearance.data,
     paint: state.paint,
     isPanning,
   };
@@ -129,6 +131,7 @@ export function EditorViewport({
       viewMode,
       activeTool,
       geometry,
+      appearance,
       paint,
       isPanning: currentIsPanning,
     } = latestRenderStateRef.current;
@@ -147,6 +150,7 @@ export function EditorViewport({
         image,
         transform: liveTransformRef.current,
         geometry,
+        appearance,
         paintDoc: paint,
         pendingStrokes: brushEngineRef.current.getPreviewStrokes(),
         activeStroke: brushEngineRef.current.getActiveStroke(),
@@ -176,6 +180,7 @@ export function EditorViewport({
       transform: liveTransformRef.current,
       viewMode,
       geometry,
+      appearance,
       borderOnly: usePaintWebGl,
       brushCursor,
     });
@@ -234,6 +239,7 @@ export function EditorViewport({
     state.viewMode,
     state.activeTool,
     state.geometry.data,
+    state.appearance.data,
     state.paint,
     state.isExporting,
     isSpacePressed,

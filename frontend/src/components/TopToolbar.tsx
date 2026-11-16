@@ -1,4 +1,15 @@
-import { Box, Download, FolderOpen, Maximize2, Minus, Plus, Redo2, Undo2, X } from 'lucide-react';
+import {
+  Box,
+  Download,
+  FolderOpen,
+  Maximize2,
+  Minus,
+  Plus,
+  Redo2,
+  SunMedium,
+  Undo2,
+  X,
+} from 'lucide-react';
 import { useEditor } from '../hooks/useEditor';
 import { PaintDocument } from '../painting/paintDocument';
 import type { ViewMode } from '../types/editor';
@@ -10,6 +21,9 @@ const VIEW_MODE_OPTIONS: Array<{ mode: ViewMode; label: string; title: string }>
   { mode: 'normals', label: 'Normals', title: 'Inferred surface normals' },
   { mode: 'mask', label: 'Mask', title: 'Valid geometry mask' },
   { mode: 'pointcloud', label: '3D', title: 'Interactive 3D point cloud' },
+  { mode: 'albedo', label: 'Albedo', title: 'Intrinsic surface reflectance' },
+  { mode: 'shading', label: 'Shading', title: 'Diffuse shading map (preview-calibrated)' },
+  { mode: 'residual', label: 'Residual', title: 'Non-diffuse appearance residual' },
 ];
 
 function InkrayMark() {
@@ -51,6 +65,8 @@ export function TopToolbar() {
     setViewMode,
     generateGeometry,
     cancelGeometry,
+    generateAppearance,
+    cancelAppearance,
     undoPaint,
     redoPaint,
     exportPng,
@@ -60,6 +76,8 @@ export function TopToolbar() {
   const geometryData = state.geometry.data;
   const hasGeometry = geometryData !== null;
   const isGeneratingGeometry = state.geometry.status === 'loading';
+  const hasAppearance = state.appearance.data !== null;
+  const isGeneratingAppearance = state.appearance.status === 'loading';
   const isPointCloudMode = state.viewMode === 'pointcloud';
   const zoomDisabled = !hasImage || isPointCloudMode;
   const canUndo = PaintDocument.canUndo(state.paint);
@@ -127,6 +145,35 @@ export function TopToolbar() {
           </button>
         )}
 
+        {isGeneratingAppearance ? (
+          <button
+            type="button"
+            className="toolbar-button toolbar-button-busy"
+            onClick={(e) => blurAfterAction(e, cancelAppearance)}
+            title="Cancel running appearance inference"
+          >
+            <X size={14} strokeWidth={1.75} />
+            <span>Cancel Appearance</span>
+          </button>
+        ) : (
+          <button
+            type="button"
+            className={`toolbar-button ${hasAppearance ? 'is-completed' : ''}`}
+            onClick={(e) =>
+              blurAfterAction(e, () => {
+                void generateAppearance();
+              })
+            }
+            disabled={!hasImage || state.isLoading}
+            title="Estimate albedo, diffuse shading, and residual with Marigold IID"
+          >
+            <SunMedium size={14} strokeWidth={1.75} />
+            <span>
+              {state.appearance.status === 'error' ? 'Retry Appearance' : 'Generate Appearance'}
+            </span>
+          </button>
+        )}
+
         <div className="toolbar-divider" aria-hidden="true" />
 
         <div className="segmented-control" role="group" aria-label="Paint history">
@@ -173,9 +220,11 @@ export function TopToolbar() {
       <div className="toolbar-group toolbar-viewport-controls">
         <div className="segmented-control view-mode-control" role="group" aria-label="View mode">
           {VIEW_MODE_OPTIONS.map((option) => {
+            const isAppearanceMode =
+              option.mode === 'albedo' || option.mode === 'shading' || option.mode === 'residual';
             const optionDisabled =
               !hasImage ||
-              (option.mode !== 'rgb' && !hasGeometry) ||
+              (isAppearanceMode ? !hasAppearance : option.mode !== 'rgb' && !hasGeometry) ||
               (option.mode === 'normals' && !geometryData?.previews.normals);
 
             return (

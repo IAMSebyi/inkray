@@ -3,6 +3,7 @@ import { PaintDocument, type PaintDocumentState } from '../painting/paintDocumen
 import { clamp } from './viewportTransforms';
 import { findSurfaceOwnerAtImagePoint } from '../painting/planeVisibility';
 import type {
+  AppearanceData,
   EditorTool,
   GeometryData,
   LoadedImage,
@@ -148,6 +149,7 @@ export interface CanvasRenderParams {
   transform: ViewportTransform;
   viewMode?: Exclude<ViewMode, 'pointcloud'>;
   geometry?: GeometryData | null;
+  appearance?: AppearanceData | null;
   borderOnly?: boolean;
   brushCursor?: BrushCursorPreview | null;
 }
@@ -183,6 +185,7 @@ export function renderViewportCanvas(
     transform,
     viewMode = 'rgb',
     geometry = null,
+    appearance = null,
     borderOnly = false,
     brushCursor = null,
   } = params;
@@ -208,6 +211,19 @@ export function renderViewportCanvas(
       showCheckerboard = true;
     } else if (viewMode === 'mask') {
       drawSource = geometry.previews.mask;
+      showCheckerboard = false;
+    }
+  }
+
+  if (appearance) {
+    if (viewMode === 'albedo') {
+      drawSource = appearance.previews.albedo;
+      showCheckerboard = false;
+    } else if (viewMode === 'shading') {
+      drawSource = appearance.previews.shading;
+      showCheckerboard = false;
+    } else if (viewMode === 'residual') {
+      drawSource = appearance.previews.residual;
       showCheckerboard = false;
     }
   }
