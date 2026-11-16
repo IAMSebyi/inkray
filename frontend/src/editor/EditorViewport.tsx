@@ -15,6 +15,7 @@ import {
   rotatePlacementFromImagePoint,
   scalePlacementFromImagePoint,
 } from '../painting/artworkPlacement';
+import { PaintDocument } from '../painting/paintDocument';
 import { getEffectiveFootprint, type PlanarDecalSurface } from '../painting/planarDecal';
 import { PlanarPaintRenderer } from '../painting/planarPaintRenderer';
 import type { Point2D, Size2D, ViewportTransform } from '../types/editor';
@@ -556,7 +557,7 @@ export function EditorViewport({
       }
 
       const picked = hitTestPlacements(
-        state.paint.artworkPlacements,
+        PaintDocument.getOrderedPlacementsBottomToTop(state.paint),
         imagePoint,
         imageSize,
         state.geometry.data,

@@ -526,9 +526,53 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     dispatch({ type: 'PLACEMENT_SET_ACTIVE', placementId });
   }, []);
 
+  const togglePlacementVisibility = useCallback((placementId: string) => {
+    dispatch({ type: 'PLACEMENT_TOGGLE_VISIBILITY', placementId });
+  }, []);
+
   const removePlacement = useCallback((placementId: string) => {
     dispatch({ type: 'PLACEMENT_REMOVE', placementId });
   }, []);
+
+  const createBrushObject = useCallback(
+    (label?: string) => {
+      cancelActiveStrokes();
+      dispatch({ type: 'PAINT_CREATE_BRUSH_OBJECT', label });
+    },
+    [cancelActiveStrokes],
+  );
+
+  const setActiveBrushObject = useCallback(
+    (brushObjectId: string | null) => {
+      cancelActiveStrokes();
+      dispatch({ type: 'PAINT_SET_ACTIVE_BRUSH_OBJECT', brushObjectId });
+    },
+    [cancelActiveStrokes],
+  );
+
+  const toggleBrushObjectVisibility = useCallback(
+    (brushObjectId: string) => {
+      cancelActiveStrokes();
+      dispatch({ type: 'PAINT_TOGGLE_BRUSH_VISIBILITY', brushObjectId });
+    },
+    [cancelActiveStrokes],
+  );
+
+  const removeBrushObject = useCallback(
+    (brushObjectId: string) => {
+      cancelActiveStrokes();
+      dispatch({ type: 'PAINT_REMOVE_BRUSH_OBJECT', brushObjectId });
+    },
+    [cancelActiveStrokes],
+  );
+
+  const reorderSceneObject = useCallback(
+    (fromIndex: number, toIndex: number) => {
+      cancelActiveStrokes();
+      dispatch({ type: 'PAINT_REORDER_SCENE_OBJECT', fromIndex, toIndex });
+    },
+    [cancelActiveStrokes],
+  );
 
   const reanchorPlacement = useCallback((placementId: string, imagePoint?: Point2D) => {
     const current = stateRef.current;
@@ -584,9 +628,8 @@ export function EditorProvider({ children }: { children: ReactNode }) {
         if (error instanceof DOMException && error.name === 'AbortError') {
           return;
         }
-        const message = error instanceof Error ? error.message : 'Failed to open save file dialog.';
-        dispatch({ type: 'PAINT_EXPORT_DONE', error: message });
-        return;
+        // Fallback to direct browser download when save dialog API is unavailable in this context.
+        fileHandle = null;
       }
     }
 
@@ -706,8 +749,14 @@ export function EditorProvider({ children }: { children: ReactNode }) {
       placeArtworkAtImagePoint,
       updatePlacement,
       setActivePlacement,
+      togglePlacementVisibility,
       removePlacement,
       reanchorPlacement,
+      createBrushObject,
+      setActiveBrushObject,
+      toggleBrushObjectVisibility,
+      removeBrushObject,
+      reorderSceneObject,
       generateGeometry,
       cancelGeometry,
       generateAppearance,
@@ -755,8 +804,14 @@ export function EditorProvider({ children }: { children: ReactNode }) {
       placeArtworkAtImagePoint,
       updatePlacement,
       setActivePlacement,
+      togglePlacementVisibility,
       removePlacement,
       reanchorPlacement,
+      createBrushObject,
+      setActiveBrushObject,
+      toggleBrushObjectVisibility,
+      removeBrushObject,
+      reorderSceneObject,
       generateGeometry,
       cancelGeometry,
       generateAppearance,

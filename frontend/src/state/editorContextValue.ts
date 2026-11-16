@@ -50,8 +50,14 @@ export interface EditorContextValue {
   placeArtworkAtImagePoint: (artworkId: string, imagePoint?: Point2D) => void;
   updatePlacement: (placement: ArtworkPlacement, recordHistory?: boolean) => void;
   setActivePlacement: (placementId: string | null) => void;
+  togglePlacementVisibility: (placementId: string) => void;
   removePlacement: (placementId: string) => void;
   reanchorPlacement: (placementId: string, imagePoint?: Point2D) => void;
+  createBrushObject: (label?: string) => void;
+  setActiveBrushObject: (brushObjectId: string | null) => void;
+  toggleBrushObjectVisibility: (brushObjectId: string) => void;
+  removeBrushObject: (brushObjectId: string) => void;
+  reorderSceneObject: (fromIndex: number, toIndex: number) => void;
   generateGeometry: () => Promise<void>;
   cancelGeometry: () => void;
   generateAppearance: () => Promise<void>;

@@ -506,4 +506,52 @@ describe('editorReducer', () => {
     expect(state.paint.artworks.length).toBe(1);
     expect(state.paint.artworks[0]?.id).toBe(art.id);
   });
+
+  it('creates brush objects, switches to brush tool, and reorders unified scene objects across undo/redo', () => {
+    const photo = createStubImage('scene', 400, 300);
+    const art = ArtworkModel.createBlank({ name: 'Sticker', width: 128, height: 128 });
+    let state = editorReducer(initialEditorState, { type: 'IMPORT_SUCCESS', image: photo });
+    state = editorReducer(state, { type: 'ARTWORK_ADD', artwork: art, openCanvas: false });
+
+    const placement = createAutomaticArtworkPlacement({
+      artwork: art,
+      imagePoint: { x: 200, y: 150 },
+      imageSize: { width: 400, height: 300 },
+      geometry: null,
+    });
+    state = editorReducer(state, { type: 'PLACEMENT_ADD', placement });
+    expect(state.activeTool).toBe('pointer');
+    expect(state.paint.sceneOrder).toEqual([{ kind: 'artwork', id: placement.id }]);
+
+    // Creating a new brush object puts it frontmost, clears placement selection, and activates brush tool.
+    state = editorReducer(state, { type: 'PAINT_CREATE_BRUSH_OBJECT', label: 'Highlights' });
+    expect(state.activeTool).toBe('brush');
+    expect(state.paint.activePlacementId).toBeNull();
+    const brushId = state.paint.activeBrushObjectId;
+    if (!brushId) throw new Error('Expected active brush object');
+    expect(state.paint.sceneOrder).toEqual([
+      { kind: 'brush', id: brushId },
+      { kind: 'artwork', id: placement.id },
+    ]);
+
+    // Drag/reorder brush object behind artwork, toggle visibility, select, remove, and undo cleanly.
+    state = editorReducer(state, { type: 'PAINT_REORDER_SCENE_OBJECT', fromIndex: 0, toIndex: 1 });
+    expect(state.paint.sceneOrder).toEqual([
+      { kind: 'artwork', id: placement.id },
+      { kind: 'brush', id: brushId },
+    ]);
+    state = editorReducer(state, { type: 'PAINT_TOGGLE_BRUSH_VISIBILITY', brushObjectId: brushId });
+    expect(state.paint.brushObjects[0]?.visible).toBe(false);
+
+    state = editorReducer(state, {
+      type: 'PLACEMENT_TOGGLE_VISIBILITY',
+      placementId: placement.id,
+    });
+    expect(state.paint.artworkPlacements[0]?.visible).toBe(false);
+
+    state = editorReducer(state, { type: 'PAINT_UNDO' });
+    expect(state.paint.artworkPlacements[0]?.visible).toBe(true);
+    state = editorReducer(state, { type: 'PAINT_UNDO' });
+    expect(state.paint.brushObjects[0]?.visible).toBe(true);
+  });
 });

@@ -114,7 +114,13 @@ export type EditorAction =
   | { type: 'PLACEMENT_ADD'; placement: ArtworkPlacement }
   | { type: 'PLACEMENT_UPDATE'; placement: ArtworkPlacement; recordHistory?: boolean }
   | { type: 'PLACEMENT_SET_ACTIVE'; placementId: string | null }
-  | { type: 'PLACEMENT_REMOVE'; placementId: string };
+  | { type: 'PLACEMENT_TOGGLE_VISIBILITY'; placementId: string }
+  | { type: 'PLACEMENT_REMOVE'; placementId: string }
+  | { type: 'PAINT_CREATE_BRUSH_OBJECT'; label?: string }
+  | { type: 'PAINT_SET_ACTIVE_BRUSH_OBJECT'; brushObjectId: string | null }
+  | { type: 'PAINT_TOGGLE_BRUSH_VISIBILITY'; brushObjectId: string }
+  | { type: 'PAINT_REMOVE_BRUSH_OBJECT'; brushObjectId: string }
+  | { type: 'PAINT_REORDER_SCENE_OBJECT'; fromIndex: number; toIndex: number };
 
 const IDLE_GEOMETRY: GeometryState = {
   status: 'idle',
@@ -727,10 +733,60 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
         paint: PaintDocument.setActivePlacement(state.paint, action.placementId),
       };
 
+    case 'PLACEMENT_TOGGLE_VISIBILITY':
+      return {
+        ...state,
+        paint: PaintDocument.togglePlacementVisibility(state.paint, action.placementId),
+      };
+
     case 'PLACEMENT_REMOVE':
       return {
         ...state,
         paint: PaintDocument.removePlacement(state.paint, action.placementId),
+      };
+
+    case 'PAINT_CREATE_BRUSH_OBJECT':
+      return {
+        ...state,
+        workspaceMode: 'photo',
+        viewMode: 'rgb',
+        activeTool: state.activeTool === 'eraser' ? 'eraser' : 'brush',
+        paint: {
+          ...PaintDocument.createBrushObject(state.paint, action.label),
+          activePlacementId: null,
+        },
+      };
+
+    case 'PAINT_SET_ACTIVE_BRUSH_OBJECT': {
+      const nextPaint = PaintDocument.setActiveBrushObject(state.paint, action.brushObjectId);
+      if (action.brushObjectId !== null && nextPaint.activePlacementId !== null) {
+        return {
+          ...state,
+          paint: { ...nextPaint, activePlacementId: null },
+        };
+      }
+      return {
+        ...state,
+        paint: nextPaint,
+      };
+    }
+
+    case 'PAINT_TOGGLE_BRUSH_VISIBILITY':
+      return {
+        ...state,
+        paint: PaintDocument.toggleBrushObjectVisibility(state.paint, action.brushObjectId),
+      };
+
+    case 'PAINT_REMOVE_BRUSH_OBJECT':
+      return {
+        ...state,
+        paint: PaintDocument.removeBrushObject(state.paint, action.brushObjectId),
+      };
+
+    case 'PAINT_REORDER_SCENE_OBJECT':
+      return {
+        ...state,
+        paint: PaintDocument.reorderSceneObject(state.paint, action.fromIndex, action.toIndex),
       };
   }
 }

@@ -3,8 +3,12 @@ import {
   Box,
   Copy,
   Eraser,
+  Eye,
+  EyeOff,
   FolderOpen,
+  GripVertical,
   ImagePlus,
+  Layers,
   Paintbrush,
   Pencil,
   Plus,
@@ -12,7 +16,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { getCheckerboardTileCanvas } from '../editor/canvasRenderer';
 import { computeFovYDegrees } from '../editor/pointCloudBuilder';
 import { useEditor } from '../hooks/useEditor';
@@ -22,6 +26,8 @@ import { calibrateShadingScale } from '../painting/colorSpace';
 import { PaintDocument } from '../painting/paintDocument';
 import type { PaintMode } from '../types/editor';
 import { formatAspectRatio, formatDimensions, formatFileSize } from '../utils/format';
+
+const SCENE_OBJECT_DRAG_MIME = 'application/x-inkray-scene-object-index';
 
 function ArtworkMiniThumb({ artwork }: { artwork: Artwork }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -90,8 +96,14 @@ export function RightSidebar() {
     placeArtworkAtImagePoint,
     updatePlacement,
     setActivePlacement,
+    togglePlacementVisibility,
     removePlacement,
     reanchorPlacement,
+    createBrushObject,
+    setActiveBrushObject,
+    toggleBrushObjectVisibility,
+    removeBrushObject,
+    reorderSceneObject,
     generateGeometry,
     cancelGeometry,
     generateAppearance,
@@ -101,6 +113,9 @@ export function RightSidebar() {
     setPaintMode,
     setTexturePreservation,
   } = useEditor();
+
+  const [draggedSceneIndex, setDraggedSceneIndex] = useState<number | null>(null);
+  const [dropTargetIndex, setDropTargetIndex] = useState<number | null>(null);
 
   const metadata = state.image?.metadata ?? null;
   const geometry = state.geometry.data;
@@ -113,6 +128,9 @@ export function RightSidebar() {
   const artworks = state.paint.artworks;
   const placements = state.paint.artworkPlacements;
   const activePlacement = PaintDocument.getActivePlacement(state.paint);
+  const brushObjects = state.paint.brushObjects;
+  const activeBrushObject = PaintDocument.getActiveBrushObject(state.paint);
+  const sceneOrder = state.paint.sceneOrder;
   const showBrushControls = isArtworkMode ? activeArtwork?.kind === 'drawn' : metadata !== null;
 
   const brushConfig = state.paint.brushConfig;
@@ -289,6 +307,26 @@ export function RightSidebar() {
                 <span>Eraser (E)</span>
               </button>
             </div>
+
+            {!isArtworkMode && (
+              <div className="brush-object-bar">
+                <span className="brush-object-name" title={activeBrushObject?.label ?? 'Brush 1'}>
+                  Target: <strong>{activeBrushObject?.label ?? 'Auto (Brush 1)'}</strong>
+                </span>
+                <button
+                  type="button"
+                  className="sidebar-action-button brush-object-new-btn"
+                  onClick={(e) => {
+                    e.currentTarget.blur();
+                    createBrushObject();
+                  }}
+                  title="Create a new separate Brush Object at top display priority"
+                >
+                  <Plus size={12} strokeWidth={1.75} />
+                  <span>New Brush</span>
+                </button>
+              </div>
+            )}
 
             <label className="inspector-control-row">
               <span className="inspector-control-header">
@@ -469,37 +507,292 @@ export function RightSidebar() {
               ))}
             </div>
           )}
+        </div>
+      </section>
 
-          {placements.length > 0 && (
-            <div className="inspector-controls-stack">
-              <span className="inspector-control-header">
-                <span>Placed on Photo</span>
-                <span className="mono">{placements.length}</span>
-              </span>
+      {!isArtworkMode && (
+        <section className="inspector-section">
+          <div className="inspector-header">
+            <h2 className="inspector-title">
+              <Layers size={13} strokeWidth={1.75} />
+              <span>Scene Objects</span>
+            </h2>
+            <span className="inspector-badge mono">{sceneOrder.length}</span>
+          </div>
 
-              <div className="placement-list">
-                {placements.map((pl) => {
-                  const isSel = pl.id === activePlacement?.id;
-                  const modeTag =
-                    pl.mapping.type === 'curved'
-                      ? 'Curved'
-                      : pl.mapping.type === 'planar'
-                        ? pl.mapping.isApproximatelyPlanar
-                          ? 'Approx'
-                          : 'Planar'
-                        : '2D';
-                  return (
-                    <div
-                      key={pl.id}
-                      className={`placement-row ${isSel ? 'is-selected' : ''}`}
-                      onClick={() => setActivePlacement(pl.id)}
-                    >
-                      <span className="placement-row-label">{pl.label}</span>
-                      <span className="mono placement-row-tag">{modeTag}</span>
-                    </div>
-                  );
-                })}
+          {!metadata ? (
+            <p className="inspector-empty-note">
+              Import an image to stack and reorder Brush and Artwork objects.
+            </p>
+          ) : (
+            <div className="inspector-content">
+              <div className="inspector-action-row">
+                <button
+                  type="button"
+                  className="sidebar-action-button"
+                  onClick={(e) => {
+                    e.currentTarget.blur();
+                    createBrushObject();
+                  }}
+                  title="Create a new Brush Object at top display priority"
+                >
+                  <Plus size={13} strokeWidth={1.75} />
+                  <span>New Brush Object</span>
+                </button>
               </div>
+
+              {sceneOrder.length === 0 ? (
+                <p className="inspector-empty-note">
+                  Draw with the Brush or place an Artwork onto the photo to control display order.
+                </p>
+              ) : (
+                <>
+                  {sceneOrder.length > 1 && (
+                    <p className="inspector-empty-note">
+                      Top renders in front. Drag rows to change display order.
+                    </p>
+                  )}
+
+                  <div
+                    className="surface-priority-list"
+                    role="list"
+                    aria-label="Scene objects display order"
+                  >
+                    {sceneOrder.map((ref, index) => {
+                      const isDragging = draggedSceneIndex === index;
+                      const isDropTarget =
+                        dropTargetIndex === index &&
+                        draggedSceneIndex !== null &&
+                        draggedSceneIndex !== index;
+
+                      if (ref.kind === 'brush') {
+                        const brushObj = brushObjects.find((b) => b.id === ref.id);
+                        if (!brushObj) return null;
+                        const strokeCount = PaintDocument.getBrushObjectStrokeCount(
+                          state.paint,
+                          brushObj.id,
+                        );
+                        const isTargetBrush = brushObj.id === activeBrushObject?.id;
+                        const isSelected = activePlacement === null && isTargetBrush;
+
+                        return (
+                          <div
+                            key={`brush:${brushObj.id}`}
+                            role="listitem"
+                            draggable
+                            onDragStart={(e) => {
+                              e.dataTransfer.setData(SCENE_OBJECT_DRAG_MIME, String(index));
+                              e.dataTransfer.effectAllowed = 'move';
+                              setDraggedSceneIndex(index);
+                            }}
+                            onDragOver={(e) => {
+                              if (
+                                draggedSceneIndex === null &&
+                                !Array.from(e.dataTransfer.types).includes(SCENE_OBJECT_DRAG_MIME)
+                              ) {
+                                return;
+                              }
+                              e.preventDefault();
+                              e.dataTransfer.dropEffect = 'move';
+                              if (dropTargetIndex !== index) {
+                                setDropTargetIndex(index);
+                              }
+                            }}
+                            onDrop={(e) => {
+                              if (
+                                draggedSceneIndex === null &&
+                                !Array.from(e.dataTransfer.types).includes(SCENE_OBJECT_DRAG_MIME)
+                              ) {
+                                return;
+                              }
+                              e.preventDefault();
+                              const rawIdx = e.dataTransfer.getData(SCENE_OBJECT_DRAG_MIME);
+                              const fromIdx = rawIdx
+                                ? Number.parseInt(rawIdx, 10)
+                                : draggedSceneIndex;
+                              if (
+                                fromIdx !== null &&
+                                Number.isFinite(fromIdx) &&
+                                fromIdx !== index
+                              ) {
+                                reorderSceneObject(fromIdx, index);
+                              }
+                              setDraggedSceneIndex(null);
+                              setDropTargetIndex(null);
+                            }}
+                            onDragEnd={() => {
+                              setDraggedSceneIndex(null);
+                              setDropTargetIndex(null);
+                            }}
+                            onClick={() => setActiveBrushObject(brushObj.id)}
+                            className={`surface-priority-item ${isSelected || isTargetBrush ? 'is-active' : ''} ${isDragging ? 'is-dragging' : ''} ${isDropTarget ? 'is-drop-target' : ''} ${!brushObj.visible ? 'is-hidden' : ''}`}
+                            title="Click to paint inside this Brush Object; drag to change display order"
+                          >
+                            <span className="surface-drag-grip" aria-hidden="true">
+                              <GripVertical size={12} strokeWidth={1.75} />
+                            </span>
+                            <span className="scene-object-icon" aria-hidden="true">
+                              <Paintbrush size={12} strokeWidth={1.75} />
+                            </span>
+                            <div className="surface-priority-meta">
+                              <div className="surface-priority-title-row">
+                                <span className="surface-priority-rank mono">#{index + 1}</span>
+                                <span className="surface-priority-label">{brushObj.label}</span>
+                              </div>
+                              <span className="surface-priority-sub mono">
+                                Brush {isTargetBrush ? '(active) ' : ''}- {strokeCount} str
+                              </span>
+                            </div>
+                            <div className="surface-item-actions">
+                              <button
+                                type="button"
+                                className="surface-icon-button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  toggleBrushObjectVisibility(brushObj.id);
+                                }}
+                                title={brushObj.visible ? 'Hide brush object' : 'Show brush object'}
+                                aria-label={
+                                  brushObj.visible
+                                    ? `Hide ${brushObj.label}`
+                                    : `Show ${brushObj.label}`
+                                }
+                              >
+                                {brushObj.visible ? (
+                                  <Eye size={12} strokeWidth={1.75} />
+                                ) : (
+                                  <EyeOff size={12} strokeWidth={1.75} />
+                                )}
+                              </button>
+                              <button
+                                type="button"
+                                className="surface-icon-button surface-delete-button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  removeBrushObject(brushObj.id);
+                                }}
+                                title="Delete brush object"
+                                aria-label={`Delete ${brushObj.label}`}
+                              >
+                                <Trash2 size={12} strokeWidth={1.75} />
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      }
+
+                      const pl = placements.find((p) => p.id === ref.id);
+                      if (!pl) return null;
+                      const isSel = pl.id === activePlacement?.id;
+                      const modeTag =
+                        pl.mapping.type === 'curved'
+                          ? 'Curved'
+                          : pl.mapping.type === 'planar'
+                            ? pl.mapping.isApproximatelyPlanar
+                              ? 'Approx'
+                              : 'Planar'
+                            : '2D';
+
+                      return (
+                        <div
+                          key={`artwork:${pl.id}`}
+                          role="listitem"
+                          draggable
+                          onDragStart={(e) => {
+                            e.dataTransfer.setData(SCENE_OBJECT_DRAG_MIME, String(index));
+                            e.dataTransfer.effectAllowed = 'move';
+                            setDraggedSceneIndex(index);
+                          }}
+                          onDragOver={(e) => {
+                            if (
+                              draggedSceneIndex === null &&
+                              !Array.from(e.dataTransfer.types).includes(SCENE_OBJECT_DRAG_MIME)
+                            ) {
+                              return;
+                            }
+                            e.preventDefault();
+                            e.dataTransfer.dropEffect = 'move';
+                            if (dropTargetIndex !== index) {
+                              setDropTargetIndex(index);
+                            }
+                          }}
+                          onDrop={(e) => {
+                            if (
+                              draggedSceneIndex === null &&
+                              !Array.from(e.dataTransfer.types).includes(SCENE_OBJECT_DRAG_MIME)
+                            ) {
+                              return;
+                            }
+                            e.preventDefault();
+                            const rawIdx = e.dataTransfer.getData(SCENE_OBJECT_DRAG_MIME);
+                            const fromIdx = rawIdx
+                              ? Number.parseInt(rawIdx, 10)
+                              : draggedSceneIndex;
+                            if (fromIdx !== null && Number.isFinite(fromIdx) && fromIdx !== index) {
+                              reorderSceneObject(fromIdx, index);
+                            }
+                            setDraggedSceneIndex(null);
+                            setDropTargetIndex(null);
+                          }}
+                          onDragEnd={() => {
+                            setDraggedSceneIndex(null);
+                            setDropTargetIndex(null);
+                          }}
+                          onClick={() => setActivePlacement(pl.id)}
+                          className={`surface-priority-item ${isSel ? 'is-active' : ''} ${isDragging ? 'is-dragging' : ''} ${isDropTarget ? 'is-drop-target' : ''} ${!pl.visible ? 'is-hidden' : ''}`}
+                          title="Click to adjust transform; drag to change display order"
+                        >
+                          <span className="surface-drag-grip" aria-hidden="true">
+                            <GripVertical size={12} strokeWidth={1.75} />
+                          </span>
+                          <span className="scene-object-icon" aria-hidden="true">
+                            <ImagePlus size={12} strokeWidth={1.75} />
+                          </span>
+                          <div className="surface-priority-meta">
+                            <div className="surface-priority-title-row">
+                              <span className="surface-priority-rank mono">#{index + 1}</span>
+                              <span className="surface-priority-label">{pl.label}</span>
+                            </div>
+                            <span className="surface-priority-sub mono">Artwork - {modeTag}</span>
+                          </div>
+                          <div className="surface-item-actions">
+                            <button
+                              type="button"
+                              className="surface-icon-button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                togglePlacementVisibility(pl.id);
+                              }}
+                              title={
+                                pl.visible ? 'Hide artwork placement' : 'Show artwork placement'
+                              }
+                              aria-label={pl.visible ? `Hide ${pl.label}` : `Show ${pl.label}`}
+                            >
+                              {pl.visible ? (
+                                <Eye size={12} strokeWidth={1.75} />
+                              ) : (
+                                <EyeOff size={12} strokeWidth={1.75} />
+                              )}
+                            </button>
+                            <button
+                              type="button"
+                              className="surface-icon-button surface-delete-button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                removePlacement(pl.id);
+                              }}
+                              title="Remove placement"
+                              aria-label={`Remove ${pl.label}`}
+                            >
+                              <Trash2 size={12} strokeWidth={1.75} />
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
 
               {activePlacement && (
                 <div className="placement-inspector">
@@ -584,7 +877,7 @@ export function RightSidebar() {
                     <button
                       type="button"
                       className="sidebar-action-button"
-                      disabled={!metadata || isArtworkMode}
+                      disabled={!metadata}
                       onClick={() => reanchorPlacement(activePlacement.id)}
                       title="Re-fit local planar or curved surface mapping at placement center"
                     >
@@ -627,8 +920,8 @@ export function RightSidebar() {
               )}
             </div>
           )}
-        </div>
-      </section>
+        </section>
+      )}
 
       <section className="inspector-section">
         <div className="inspector-header">

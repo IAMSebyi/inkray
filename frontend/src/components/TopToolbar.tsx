@@ -271,7 +271,7 @@ export function TopToolbar() {
           }
           disabled={!canExport}
           aria-label="Export composited PNG"
-          title="Export composited PNG with geometry-aware paint"
+          title="Choose export location and save composited PNG"
         >
           <Download size={14} strokeWidth={1.75} />
           <span>{state.isExporting ? 'Exporting...' : 'Export PNG'}</span>
