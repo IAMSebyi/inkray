@@ -18,19 +18,19 @@ Inkray is an open-source, geometry-aware image editor inspired by Adobe's Projec
 
 ## Current Status
 
-Inkray implements monocular 3D geometry inference, 2.5D mesh/point cloud visualization, and geometry-aware planar surface painting:
+Inkray implements monocular 3D geometry inference, intrinsic lighting decomposition, 2.5D mesh/point cloud visualization, and geometry- + lighting-aware planar surface painting:
 
 - **Implemented:**
   - Frontend workspace (`React` + `TypeScript` + `Vite` + `Three.js`) with strict TypeScript checking, ESLint, Prettier, and Vitest.
   - Dark-themed editor layout (top toolbar, left tool rail, central viewport, right inspector sidebar, bottom status bar).
   - JPEG and PNG image importing via file picker and drag-and-drop, with format/header validation, error handling, non-destructive image replacement, and access to unmodified source pixels.
   - High-DPI viewport with cursor-anchored wheel/trackpad zoom, middle-mouse and `Space + left-drag` panning, Fit to Screen, 100% zoom, and resize handling.
-  - Python + FastAPI backend integrating **MoGe-3** (`Ruicheng/moge-3-vitl`) for monocular depth, surface normals, 3D point maps, valid mask, and normalized camera intrinsics.
-  - Content-addressed disk caching of inferred geometry (`.npz` + metadata JSON) with binary array HTTP endpoints (`float32` / `uint8`) and request cancellation.
-  - Viewport visualization modes (`RGB`, `Depth`, `Normals`, `Mask`, and interactive `3D` `Points | 2.5D Mesh` viewer in Three.js with `OrbitControls`), plus live cursor depth sampling.
-  - Geometry-aware planar painting: single-request backend NumPy/SciPy RANSAC + connected surface region growing (`POST /api/geometry/{id}/surface/select`), client-side stable plane coordinate frames, perspective GPU decal projection via WebGL2 shaders, depth/normal foreground occlusion handling, anti-accumulation single-stroke brush compositing, cross-surface undo/redo history, and full-resolution PNG export.
+  - Python + FastAPI backend integrating **MoGe-3** (`Ruicheng/moge-3-vitl`) for monocular depth, surface normals, 3D point maps, valid mask, and normalized camera intrinsics, and **Marigold IID Lighting v1.1** (`prs-eth/marigold-iid-lighting-v1-1`) via Hugging Face Diffusers for intrinsic albedo, diffuse shading, and non-diffuse residual estimation.
+  - Content-addressed disk caching of inferred geometry and appearance layers (`.npz` + metadata JSON) with binary array HTTP endpoints (`float32` / `uint8`), sequential GPU memory management, and request cancellation.
+  - Viewport visualization modes (`RGB`, `Depth`, `Normals`, `Mask`, interactive `3D` `Points | 2.5D Mesh` viewer, `Albedo`, `Shading`, `Residual`), plus live cursor depth sampling.
+  - Geometry-aware and lighting-aware planar painting: single-request backend NumPy/SciPy RANSAC + connected surface region growing (`POST /api/geometry/{id}/surface/select`), client-side stable plane coordinate frames, deterministic per-surface shading calibration, linear-RGB WebGL2 compositing (`Flat`, `Shading`, and `Texture` modes with configurable `Texture Detail`), depth/normal foreground occlusion handling, anti-accumulation single-stroke brush compositing, cross-surface undo/redo history, and full-resolution PNG export.
 - **Not Yet Implemented:**
-  - Marigold IID intrinsic lighting decomposition, relighting-aware compositing, SAM 2 interactive segmentation, curved-surface painting, and named paint layers.
+  - Physically accurate relighting or synthetic light insertion, SAM 2 interactive segmentation, curved-surface painting, and named paint layers.
 
 ---
 
@@ -40,12 +40,12 @@ Inkray implements monocular 3D geometry inference, 2.5D mesh/point cloud visuali
 inkray/
 ├── frontend/                  # React + TypeScript + Vite editor application
 │   ├── src/
-│   │   ├── api/               # Binary HTTP client for backend geometry endpoints
+│   │   ├── api/               # Binary HTTP clients for backend geometry & appearance endpoints
 │   │   ├── components/        # UI panels, toolbars, and status bar
 │   │   ├── editor/            # 2D canvas renderer, 3D point/mesh viewer, previews, transforms
 │   │   ├── geometry/          # OpenCV geometry helpers, plane frame projection, and 2.5D mesh builder
 │   │   ├── hooks/             # Custom React hooks (resize, shortcuts, drag-and-drop import)
-│   │   ├── painting/          # Brush engine, decal parameterization, visibility math, GPU renderer, document history
+│   │   ├── painting/          # Brush engine, decal parameterization, color calibration, GPU renderer, history
 │   │   ├── state/             # Editor reducer, context provider, and cursor coordinate store
 │   │   ├── styles/            # Design tokens, global styles, and editor layout CSS
 │   │   ├── types/             # Shared TypeScript definitions
@@ -54,17 +54,18 @@ inkray/
 │   ├── tsconfig.json
 │   ├── vite.config.ts
 │   └── package.json
-├── backend/                   # Python + FastAPI + PyTorch (MoGe-3) geometry service
+├── backend/                   # Python + FastAPI + PyTorch (MoGe-3 & Marigold IID) service
 │   ├── app/
-│   │   ├── api/               # FastAPI routes for inference metadata, binary arrays, and surface selection
-│   │   ├── cache/             # Content-addressed disk cache for inferred geometry
+│   │   ├── api/               # FastAPI routes for geometry, appearance, binary arrays, and surface selection
+│   │   ├── appearance/        # Typed albedo/shading/residual maps, color space conversions, and calibration
+│   │   ├── cache/             # Content-addressed disk caches for geometry and appearance layers
 │   │   ├── geometry/          # Typed geometry containers, transforms, RANSAC plane fitter, and surface selector
-│   │   ├── inference/         # Model wrapper abstraction and MoGe-3 implementation
+│   │   ├── inference/         # Model wrapper abstraction, MoGe-3, Marigold IID, and GPU memory swap
 │   │   ├── utils/             # Pillow image decoding and EXIF orientation normalization
 │   │   ├── config.py          # Environment-driven backend configuration
 │   │   └── main.py            # FastAPI app factory, CORS, and model lifespan
-│   ├── scripts/               # Standalone model + cache smoke test
-│   ├── tests/                 # Fast pytest suite for geometry math, caching, and API routes
+│   ├── scripts/               # Standalone model, cache, and visual appearance evaluation scripts
+│   ├── tests/                 # Fast pytest suite for geometry, appearance, caching, and API routes
 │   ├── pyproject.toml
 │   └── README.md
 ├── .gitignore
@@ -129,14 +130,15 @@ npm run format:check
 npm run build
 ```
 
-### Geometry-Aware Painting Workflow
+### Geometry- & Lighting-Aware Painting Workflow
 
-1. Import a JPEG or PNG photograph (`O`) and click **Generate Geometry**.
-2. Optionally switch to `3D` view and toggle between **Points** and **2.5D Mesh** to inspect surface continuity.
+1. Import a JPEG or PNG photograph (`O`) and click **Generate Geometry** to reconstruct scene depth, normals, and intrinsics with MoGe-3.
+2. Optionally click **Generate Appearance** to decompose intrinsic `Albedo`, `Shading`, and `Residual` layers with Marigold IID Lighting v1.1 and inspect them from the top toolbar.
 3. Activate **Select Planar Surface** (`S`) and click one or more planar regions (walls, floor, tabletops, facades) to add painting surfaces.
 4. Open the **Surfaces** tab in the right sidebar to drag-and-drop surface priorities (`#1` wins overlapping intersections), adjust **Footprint Extent** (`50%`-`250%`), or toggle ownership overlays.
-5. Switch manually to **Surface Brush** (`B`) or **Surface Eraser** (`E`). Paint or erase continuously across selected planes with a live perspective brush ring, automatic foreground depth occlusion, and atomic cross-surface strokes.
-6. Use **Undo** (`Ctrl/Cmd + Z`), **Redo** (`Ctrl/Cmd + Shift + Z`), or **Export PNG** (opens a Save dialog where supported, or downloads `<name>-inkray.png`) while staying in the live RGB painting viewport.
+5. In the **Intrinsic Lighting** inspector section, switch live compositing between **Flat**, **Shading** (diffuse shadow/illumination preservation), and **Texture** (illuminated micro-texture transfer via the **Texture Detail** slider).
+6. Switch manually to **Surface Brush** (`B`) or **Surface Eraser** (`E`). Paint or erase continuously across selected planes with a live perspective brush ring, automatic foreground depth occlusion, and atomic cross-surface strokes.
+7. Use **Undo** (`Ctrl/Cmd + Z`), **Redo** (`Ctrl/Cmd + Shift + Z`), or **Export PNG** (opens a Save dialog where supported, or downloads `<name>-inkray.png`) while staying in the live RGB painting viewport.
 
 ### Keyboard Shortcuts
 
@@ -157,9 +159,16 @@ npm run build
 | `1` or `Ctrl/Cmd + 1` | Zoom to 100% (1 source pixel = 1 CSS pixel) |
 | `+` / `-` | Zoom in / out |
 
+### Model Attribution & Licensing Notes
+
+- **MoGe-3** (`Ruicheng/moge-3-vitl`) provides monocular depth, normals, point maps, and intrinsics.
+- **Marigold IID Lighting v1.1** (`prs-eth/marigold-iid-lighting-v1-1`), run via **Hugging Face Diffusers** (`MarigoldIntrinsicsPipeline`), is licensed under **CreativeML OpenRAIL++-M**, which carries separate usage restrictions from Inkray's source code and Apache-2.0 library dependencies. Users deploying or redistributing model outputs are responsible for complying with the model card license terms.
+
 ### Known Limitations
 
 - Painting operates on local planar approximations; curved surfaces will depart from the fitted plane away from the planar support region.
 - Visibility and occlusion quality depend on MoGe-3 depth and normal accuracy near silhouettes.
+- Appearance compositing assumes an additive-diffuse edit over estimated linear albedo and shading (`I_out = I_orig + alpha * S_cal * (P - A)`). It does not add synthetic directional light sources or physically relight specular reflections.
+- Marigold predicts diffuse shading up to an arbitrary global scale factor; calibration fits a robust deterministic scale per surface and falls back automatically to Flat Paint when surface albedo/shading samples are degenerate (e.g., near-black or clipped white regions).
+- On consumer 8 GB GPUs, MoGe-3 and Marigold offload inactive weights to CPU RAM between requests (`INKRAY_OFFLOAD_INACTIVE_MODELS=true`), adding a brief swap delay when alternating models.
 - Export resolution is bounded by the WebGL `MAX_TEXTURE_SIZE` and `MAX_RENDERBUFFER_SIZE` limits of the active GPU.
-- Lighting-aware shading and interactive GPU frame-rate measurements are not included yet.
