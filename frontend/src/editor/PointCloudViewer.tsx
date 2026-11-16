@@ -2,6 +2,7 @@ import { RotateCcw } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { ImageMeshBuilder } from '../geometry/imageMeshBuilder';
 import type { GeometryData } from '../types/editor';
 import {
   DEFAULT_POINT_BUDGET,
@@ -15,6 +16,7 @@ interface PointCloudViewerProps {
 }
 
 type DensityMode = 'auto' | 'full';
+type ViewMode3D = 'points' | 'mesh';
 
 export function PointCloudViewer({ geometry }: PointCloudViewerProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -23,6 +25,7 @@ export function PointCloudViewer({ geometry }: PointCloudViewerProps) {
   const materialRef = useRef<THREE.PointsMaterial | null>(null);
 
   const [densityMode, setDensityMode] = useState<DensityMode>('auto');
+  const [viewMode3d, setViewMode3d] = useState<ViewMode3D>('points');
   const [pointSize, setPointSize] = useState<number>(2);
   const pointSizeRef = useRef(pointSize);
   pointSizeRef.current = pointSize;
@@ -103,20 +106,42 @@ export function PointCloudViewer({ geometry }: PointCloudViewerProps) {
     controls.update();
     controlsRef.current = controls;
 
-    const bufferGeometry = new THREE.BufferGeometry();
-    bufferGeometry.setAttribute('position', new THREE.BufferAttribute(cloudData.positions, 3));
-    bufferGeometry.setAttribute('color', new THREE.BufferAttribute(cloudData.colors, 3));
-    bufferGeometry.computeBoundingSphere();
+    let activeGeometry: THREE.BufferGeometry;
+    let activeMaterial: THREE.Material;
 
-    const material = new THREE.PointsMaterial({
-      size: pointSizeRef.current,
-      sizeAttenuation: false,
-      vertexColors: true,
-    });
-    materialRef.current = material;
+    if (viewMode3d === 'mesh') {
+      const meshGeometry = ImageMeshBuilder.build(geometry, {
+        coordinateSystem: 'threejs',
+        colors: geometry.colors,
+      });
+      const meshMaterial = new THREE.MeshBasicMaterial({
+        vertexColors: meshGeometry.hasAttribute('color'),
+        color: 0xffffff,
+        side: THREE.DoubleSide,
+      });
+      const meshObject = new THREE.Mesh(meshGeometry, meshMaterial);
+      scene.add(meshObject);
+      activeGeometry = meshGeometry;
+      activeMaterial = meshMaterial;
+      materialRef.current = null;
+    } else {
+      const bufferGeometry = new THREE.BufferGeometry();
+      bufferGeometry.setAttribute('position', new THREE.BufferAttribute(cloudData.positions, 3));
+      bufferGeometry.setAttribute('color', new THREE.BufferAttribute(cloudData.colors, 3));
+      bufferGeometry.computeBoundingSphere();
 
-    const pointsObject = new THREE.Points(bufferGeometry, material);
-    scene.add(pointsObject);
+      const pointsMaterial = new THREE.PointsMaterial({
+        size: pointSizeRef.current,
+        sizeAttenuation: false,
+        vertexColors: true,
+      });
+      materialRef.current = pointsMaterial;
+
+      const pointsObject = new THREE.Points(bufferGeometry, pointsMaterial);
+      scene.add(pointsObject);
+      activeGeometry = bufferGeometry;
+      activeMaterial = pointsMaterial;
+    }
 
     const resizeObserver = new ResizeObserver((entries) => {
       const entry = entries[0];
@@ -144,8 +169,8 @@ export function PointCloudViewer({ geometry }: PointCloudViewerProps) {
       window.cancelAnimationFrame(rafId);
       resizeObserver.disconnect();
       controls.dispose();
-      bufferGeometry.dispose();
-      material.dispose();
+      activeGeometry.dispose();
+      activeMaterial.dispose();
       renderer.dispose();
       if (renderer.domElement.parentNode === host) {
         host.removeChild(renderer.domElement);
@@ -154,25 +179,47 @@ export function PointCloudViewer({ geometry }: PointCloudViewerProps) {
       controlsRef.current = null;
       materialRef.current = null;
     };
-  }, [cloudData, initialPose]);
+  }, [geometry, cloudData, initialPose, viewMode3d]);
 
   useEffect(() => {
-    if (materialRef.current) {
+    if (materialRef.current && viewMode3d === 'points') {
       materialRef.current.size = pointSize;
     }
-  }, [pointSize]);
+  }, [pointSize, viewMode3d]);
 
   return (
     <div className="pointcloud-viewer">
       <div ref={hostRef} className="pointcloud-canvas-host" />
 
       <div className="pointcloud-overlay-bar">
+        <div className="segmented-control" role="group" aria-label="3D representation">
+          <button
+            type="button"
+            className={`view-mode-button ${viewMode3d === 'points' ? 'is-active' : ''}`}
+            onClick={() => setViewMode3d('points')}
+            aria-pressed={viewMode3d === 'points'}
+            title="View inferred 3D points"
+          >
+            Points
+          </button>
+          <button
+            type="button"
+            className={`view-mode-button ${viewMode3d === 'mesh' ? 'is-active' : ''}`}
+            onClick={() => setViewMode3d('mesh')}
+            aria-pressed={viewMode3d === 'mesh'}
+            title="View 2.5D discontinuity-filtered surface mesh"
+          >
+            2.5D Mesh
+          </button>
+        </div>
+
         <span className="pointcloud-stat mono">
-          {cloudData.pointCount.toLocaleString()} pts
-          {stride > 1 ? ` (stride ${stride}x)` : ''}
+          {viewMode3d === 'mesh'
+            ? `${geometry.metadata.inference_width}x${geometry.metadata.inference_height} mesh`
+            : `${cloudData.pointCount.toLocaleString()} pts${stride > 1 ? ` (stride ${stride}x)` : ''}`}
         </span>
 
-        {autoStride > 1 && (
+        {viewMode3d === 'points' && autoStride > 1 && (
           <button
             type="button"
             className="toolbar-button"
@@ -183,27 +230,29 @@ export function PointCloudViewer({ geometry }: PointCloudViewerProps) {
           </button>
         )}
 
-        <div className="segmented-control" role="group" aria-label="Point size">
-          <button
-            type="button"
-            className="toolbar-icon-button"
-            onClick={() => setPointSize((s) => Math.max(1, s - 1))}
-            aria-label="Decrease point size"
-            title="Smaller points"
-          >
-            -
-          </button>
-          <span className="point-size-readout mono">{pointSize}px</span>
-          <button
-            type="button"
-            className="toolbar-icon-button"
-            onClick={() => setPointSize((s) => Math.min(6, s + 1))}
-            aria-label="Increase point size"
-            title="Larger points"
-          >
-            +
-          </button>
-        </div>
+        {viewMode3d === 'points' && (
+          <div className="segmented-control" role="group" aria-label="Point size">
+            <button
+              type="button"
+              className="toolbar-icon-button"
+              onClick={() => setPointSize((s) => Math.max(1, s - 1))}
+              aria-label="Decrease point size"
+              title="Smaller points"
+            >
+              -
+            </button>
+            <span className="point-size-readout mono">{pointSize}px</span>
+            <button
+              type="button"
+              className="toolbar-icon-button"
+              onClick={() => setPointSize((s) => Math.min(6, s + 1))}
+              aria-label="Increase point size"
+              title="Larger points"
+            >
+              +
+            </button>
+          </div>
+        )}
 
         <button
           type="button"
