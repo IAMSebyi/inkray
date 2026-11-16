@@ -32,10 +32,24 @@ class MoGeInference(InferenceModel[np.ndarray, GeometryResult]):
         self.refine_steps = refine_steps
         self.use_fp16 = use_fp16 and self.device.type == "cuda"
         self.model = MoGeModel.from_pretrained(model_id).to(self.device).eval()
+        self._active_device = self.device
+
+    def activate_device(self) -> None:
+        if self._active_device != self.device:
+            self.model.to(self.device)
+            self._active_device = self.device
+
+    def offload_to_cpu(self) -> None:
+        if self.device.type == "cuda" and self._active_device.type == "cuda":
+            self.model.to("cpu")
+            self._active_device = torch.device("cpu")
+            torch.cuda.empty_cache()
 
     def run(self, input_data: np.ndarray) -> GeometryResult:
         if input_data.ndim != 3 or input_data.shape[2] != 3:
             raise ValueError(f"Expected RGB image array (H, W, 3), got {input_data.shape}.")
+
+        self.activate_device()
 
         if np.issubdtype(input_data.dtype, np.floating):
             rgb = np.clip(input_data, 0.0, 1.0).astype(np.float32, copy=False)

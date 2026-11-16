@@ -5,13 +5,17 @@ description = "Python/FastAPI geometry inference service for Inkray"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+  "accelerate>=1.0.0",
+  "diffusers>=0.41.0",
   "fastapi>=0.115.0",
   "numpy>=2.0",
   "pillow>=10.4.0",
   "python-multipart>=0.0.12",
+  "safetensors>=0.4.0",
   "scipy>=1.11.0",
   "torch>=2.4",
   "torchvision>=0.19",
+  "transformers>=4.49.0",
   "uvicorn[standard]>=0.32.0",
   "moge @ git+https://github.com/microsoft/MoGe.git",
 ]
