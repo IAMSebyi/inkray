@@ -4,6 +4,7 @@ import type { BrushUiConfig } from '../painting/paintDocument';
 import type { PlanarPaintRenderer } from '../painting/planarPaintRenderer';
 import type {
   EditorTool,
+  PaintMode,
   Point2D,
   Size2D,
   ViewMode,
@@ -32,12 +33,16 @@ export interface EditorContextValue {
   setViewMode: (mode: ViewMode) => void;
   generateGeometry: () => Promise<void>;
   cancelGeometry: () => void;
+  generateAppearance: () => Promise<void>;
+  cancelAppearance: () => void;
   selectSurfaceAtImagePoint: (imagePoint: Point2D) => Promise<void>;
   setActiveSurface: (surfaceId: string) => void;
   removeSurface: (surfaceId: string) => void;
   reorderSurfaces: (fromIndex: number, toIndex: number) => void;
   setFootprintExtent: (surfaceId: string, extentScale: number) => void;
   setBrushConfig: (patch: Partial<BrushUiConfig>) => void;
+  setPaintMode: (mode: PaintMode) => void;
+  setTexturePreservation: (value: number) => void;
   setPaintOverlayOptions: (patch: {
     showSupportOverlay?: boolean;
     showFootprintPreview?: boolean;

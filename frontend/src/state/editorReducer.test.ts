@@ -4,7 +4,7 @@ import {
   createSyntheticPlanarScene,
 } from '../geometry/testFixtures';
 import type { BrushStroke } from '../painting/brushEngine';
-import type { GeometryData, LoadedImage } from '../types/editor';
+import type { AppearanceData, GeometryData, LoadedImage } from '../types/editor';
 import { editorReducer, initialEditorState } from './editorReducer';
 
 function createStubImage(id: string, width: number, height: number): LoadedImage {
@@ -64,6 +64,48 @@ function createStubGeometry(imageId: string, withNormals = true): GeometryData {
       depth: {} as HTMLCanvasElement,
       normals: withNormals ? ({} as HTMLCanvasElement) : null,
       mask: {} as HTMLCanvasElement,
+    },
+  };
+}
+
+function createStubAppearance(imageId: string): AppearanceData {
+  return {
+    imageId,
+    metadata: {
+      id: 'app123',
+      cache_version: 1,
+      image_sha256: 'deadbeef',
+      model_id: 'prs-eth/marigold-iid-lighting-v1-1',
+      denoising_steps: 4,
+      processing_resolution: 768,
+      ensemble_size: 1,
+      seed: 42,
+      use_fp16: true,
+      max_image_size: 1024,
+      original_width: 100,
+      original_height: 100,
+      appearance_width: 100,
+      appearance_height: 100,
+      prediction_space: 'linear',
+      scale_conventions: {
+        albedo: 'bounded_0_1',
+        shading: 'up_to_scale',
+        residual: 'up_to_scale',
+      },
+      albedo_range: [0.1, 0.9],
+      shading_range: [0.2, 0.95],
+      residual_range: [0, 0.2],
+      cached: false,
+      arrays: {},
+    },
+    albedo: new Float32Array(0),
+    shading: new Float32Array(0),
+    residual: new Float32Array(0),
+    linearReference: new Float32Array(0),
+    previews: {
+      albedo: {} as HTMLCanvasElement,
+      shading: {} as HTMLCanvasElement,
+      residual: {} as HTMLCanvasElement,
     },
   };
 }
@@ -268,5 +310,83 @@ describe('editorReducer', () => {
     expect(state.paint.surfaces.length).toBe(0);
     expect(state.paint.activeSurfaceId).toBeNull();
     expect(state.activeTool).toBe('pointer');
+  });
+
+  it('manages appearance lifecycle, ignores stale completions, and supports lighting paint modes across undo/redo', () => {
+    const img1 = createStubImage('scene-1', 24, 24);
+    const img2 = createStubImage('scene-2', 24, 24);
+    const geom1 = createStubGeometry('scene-1');
+    const app1 = createStubAppearance('scene-1');
+
+    let state = editorReducer(initialEditorState, { type: 'IMPORT_SUCCESS', image: img1 });
+    state = editorReducer(state, { type: 'GEOMETRY_START' });
+    state = editorReducer(state, { type: 'GEOMETRY_SUCCESS', data: geom1 });
+
+    // Appearance views stay gated before inference completes.
+    state = editorReducer(state, { type: 'SET_VIEW_MODE', mode: 'albedo' });
+    expect(state.viewMode).toBe('rgb');
+
+    state = editorReducer(state, { type: 'APPEARANCE_START' });
+    expect(state.appearance.status).toBe('loading');
+
+    // Stale completion for scene-1 after switching to scene-2 must be ignored.
+    let staleState = editorReducer(state, { type: 'IMPORT_SUCCESS', image: img2 });
+    staleState = editorReducer(staleState, { type: 'APPEARANCE_SUCCESS', data: app1 });
+    expect(staleState.appearance.status).toBe('idle');
+    expect(staleState.appearance.data).toBeNull();
+
+    // Valid completion unlocks albedo/shading/residual view modes while preserving geometry.
+    state = editorReducer(state, { type: 'APPEARANCE_SUCCESS', data: app1 });
+    expect(state.appearance.status).toBe('ready');
+    expect(state.geometry.status).toBe('ready');
+
+    state = editorReducer(state, { type: 'SET_VIEW_MODE', mode: 'shading' });
+    expect(state.viewMode).toBe('shading');
+    state = editorReducer(state, { type: 'SET_VIEW_MODE', mode: 'residual' });
+    expect(state.viewMode).toBe('residual');
+
+    // Switching compositing modes & texture strength works independently of stroke undo history.
+    state = editorReducer(state, { type: 'PAINT_SET_MODE', mode: 'texture' });
+    state = editorReducer(state, { type: 'PAINT_SET_TEXTURE_PRESERVATION', value: 0.4 });
+    expect(state.paint.paintMode).toBe('texture');
+    expect(state.paint.texturePreservation).toBeCloseTo(0.4, 5);
+
+    const scene = createSyntheticPlanarScene({
+      width: 24,
+      height: 24,
+      planeOrigin: [0, 0, 3.0],
+      planeNormal: [0, 0, -1],
+    });
+    state = editorReducer(state, {
+      type: 'PAINT_SELECT_SURFACE',
+      selection: buildSyntheticSurfaceSelection(scene, 12, 12),
+    });
+    const surfId = state.paint.surfaces[0]?.id;
+    if (!surfId) throw new Error('Expected surface');
+
+    state = editorReducer(state, {
+      type: 'PAINT_COMMIT_STROKE',
+      stroke: {
+        id: 'lit-stroke-1',
+        surfaceId: surfId,
+        mode: 'paint',
+        brush: { diameter: 0.2, color: '#22aaee', opacity: 0.9, hardness: 0.8 },
+        points: [{ u: 0, v: 0 }],
+      },
+    });
+    expect(state.paint.strokes.length).toBe(1);
+
+    state = editorReducer(state, { type: 'PAINT_SET_MODE', mode: 'flat' });
+    expect(state.paint.paintMode).toBe('flat');
+    state = editorReducer(state, { type: 'PAINT_UNDO' });
+    expect(state.paint.strokes.length).toBe(0);
+    state = editorReducer(state, { type: 'PAINT_REDO' });
+    expect(state.paint.strokes.length).toBe(1);
+
+    // Cancelling appearance resets appearance status and returns view to RGB cleanly.
+    state = editorReducer(state, { type: 'SET_VIEW_MODE', mode: 'albedo' });
+    state = editorReducer(state, { type: 'APPEARANCE_CANCEL' });
+    expect(state.appearance.status).toBe('idle');
+    expect(state.viewMode).toBe('rgb');
   });
 });

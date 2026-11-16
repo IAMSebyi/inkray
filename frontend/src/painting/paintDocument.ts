@@ -1,3 +1,4 @@
+import type { PaintMode } from '../types/editor';
 import type { PlaneFootprint, SurfaceSelectionResult } from '../geometry/planeFrame';
 import { clamp } from '../editor/viewportTransforms';
 import type { BrushSettings, BrushStroke } from './brushEngine';
@@ -27,6 +28,8 @@ export interface PaintDocumentState {
   selectionError: string | null;
   showSupportOverlay: boolean;
   showFootprintPreview: boolean;
+  paintMode: PaintMode;
+  texturePreservation: number;
   brushConfig: BrushUiConfig;
 }
 
@@ -36,6 +39,8 @@ export const DEFAULT_BRUSH_CONFIG: BrushUiConfig = {
   opacity: 0.9,
   hardness: 0.75,
 };
+
+export const DEFAULT_TEXTURE_PRESERVATION = 0.75;
 
 const MAX_UNDO_HISTORY = 100;
 let nextSurfaceSeq = 1;
@@ -54,7 +59,11 @@ function pushUndoSnapshot(doc: PaintDocumentState): PaintHistorySnapshot[] {
 }
 
 export const PaintDocument = {
-  createInitial(previousConfig?: BrushUiConfig): PaintDocumentState {
+  createInitial(
+    previousConfig?: BrushUiConfig,
+    previousMode?: PaintMode,
+    previousTexturePreservation?: number,
+  ): PaintDocumentState {
     return {
       surfaces: [],
       activeSurfaceId: null,
@@ -66,6 +75,11 @@ export const PaintDocument = {
       selectionError: null,
       showSupportOverlay: true,
       showFootprintPreview: true,
+      paintMode: previousMode ?? 'shading',
+      texturePreservation:
+        previousTexturePreservation !== undefined
+          ? clamp(previousTexturePreservation, 0, 1)
+          : DEFAULT_TEXTURE_PRESERVATION,
       brushConfig: previousConfig ? { ...previousConfig } : { ...DEFAULT_BRUSH_CONFIG },
     };
   },
@@ -229,6 +243,27 @@ export const PaintDocument = {
       ...doc,
       showSupportOverlay: patch.showSupportOverlay ?? doc.showSupportOverlay,
       showFootprintPreview: patch.showFootprintPreview ?? doc.showFootprintPreview,
+    };
+  },
+
+  setPaintMode(doc: PaintDocumentState, paintMode: PaintMode): PaintDocumentState {
+    if (doc.paintMode === paintMode) {
+      return doc;
+    }
+    return {
+      ...doc,
+      paintMode,
+    };
+  },
+
+  setTexturePreservation(doc: PaintDocumentState, value: number): PaintDocumentState {
+    const next = clamp(value, 0, 1);
+    if (Math.abs(doc.texturePreservation - next) < 1e-4) {
+      return doc;
+    }
+    return {
+      ...doc,
+      texturePreservation: next,
     };
   },
 

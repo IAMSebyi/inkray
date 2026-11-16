@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, type ReactNode } from 'react';
+import { fetchAppearanceForImage } from '../api/appearanceClient';
 import { fetchGeometryForImage, selectSurfaceForGeometry } from '../api/geometryClient';
 import { ImageLoadError, loadImageFromFile } from '../editor/imageLoader';
 import { BrushEngine, type BrushStroke } from '../painting/brushEngine';
@@ -7,6 +8,7 @@ import type { PlanarPaintRenderer } from '../painting/planarPaintRenderer';
 import type {
   EditorTool,
   LoadedImage,
+  PaintMode,
   Point2D,
   Size2D,
   ViewMode,
@@ -52,8 +54,10 @@ export function EditorProvider({ children }: { children: ReactNode }) {
 
   const activeAbortRef = useRef<AbortController | null>(null);
   const geometryAbortRef = useRef<AbortController | null>(null);
+  const appearanceAbortRef = useRef<AbortController | null>(null);
   const surfaceSelectAbortRef = useRef<AbortController | null>(null);
   const geometryInFlightRef = useRef(false);
+  const appearanceInFlightRef = useRef(false);
   const activeImageRef = useRef<LoadedImage | null>(null);
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -66,6 +70,7 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     return () => {
       activeAbortRef.current?.abort();
       geometryAbortRef.current?.abort();
+      appearanceAbortRef.current?.abort();
       surfaceSelectAbortRef.current?.abort();
       activeImageRef.current?.dispose();
     };
@@ -93,6 +98,9 @@ export function EditorProvider({ children }: { children: ReactNode }) {
         geometryAbortRef.current?.abort();
         geometryAbortRef.current = null;
         geometryInFlightRef.current = false;
+        appearanceAbortRef.current?.abort();
+        appearanceAbortRef.current = null;
+        appearanceInFlightRef.current = false;
         surfaceSelectAbortRef.current?.abort();
         surfaceSelectAbortRef.current = null;
 
@@ -173,6 +181,48 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     dispatch({ type: 'GEOMETRY_CANCEL' });
   }, []);
 
+  const generateAppearance = useCallback(async () => {
+    const targetImage = activeImageRef.current;
+    if (!targetImage || appearanceInFlightRef.current) {
+      return;
+    }
+
+    appearanceInFlightRef.current = true;
+    const abortController = new AbortController();
+    appearanceAbortRef.current = abortController;
+    dispatch({ type: 'APPEARANCE_START' });
+
+    try {
+      const data = await fetchAppearanceForImage(targetImage, abortController.signal);
+      if (abortController.signal.aborted || activeImageRef.current?.id !== targetImage.id) {
+        return;
+      }
+      dispatch({ type: 'APPEARANCE_SUCCESS', data });
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        return;
+      }
+      if (activeImageRef.current?.id !== targetImage.id) {
+        return;
+      }
+      const message =
+        error instanceof Error ? error.message : 'Failed to generate appearance from backend.';
+      dispatch({ type: 'APPEARANCE_ERROR', imageId: targetImage.id, message });
+    } finally {
+      if (appearanceAbortRef.current === abortController) {
+        appearanceAbortRef.current = null;
+        appearanceInFlightRef.current = false;
+      }
+    }
+  }, []);
+
+  const cancelAppearance = useCallback(() => {
+    appearanceAbortRef.current?.abort();
+    appearanceAbortRef.current = null;
+    appearanceInFlightRef.current = false;
+    dispatch({ type: 'APPEARANCE_CANCEL' });
+  }, []);
+
   const selectSurfaceAtImagePoint = useCallback(async (imagePoint: Point2D) => {
     const current = stateRef.current;
     const targetImage = current.image;
@@ -251,6 +301,14 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     dispatch({ type: 'PAINT_SET_BRUSH_CONFIG', patch });
   }, []);
 
+  const setPaintMode = useCallback((mode: PaintMode) => {
+    dispatch({ type: 'PAINT_SET_MODE', mode });
+  }, []);
+
+  const setTexturePreservation = useCallback((value: number) => {
+    dispatch({ type: 'PAINT_SET_TEXTURE_PRESERVATION', value });
+  }, []);
+
   const setPaintOverlayOptions = useCallback(
     (patch: { showSupportOverlay?: boolean; showFootprintPreview?: boolean }) => {
       dispatch({ type: 'PAINT_SET_OVERLAY_OPTIONS', patch });
@@ -318,6 +376,7 @@ export function EditorProvider({ children }: { children: ReactNode }) {
       const blob = await renderer.exportPngBlob({
         image: exportImage,
         geometry: exportGeometry,
+        appearance: latest.appearance.data,
         paintDoc: latest.paint,
       });
 
@@ -406,12 +465,16 @@ export function EditorProvider({ children }: { children: ReactNode }) {
       setViewMode,
       generateGeometry,
       cancelGeometry,
+      generateAppearance,
+      cancelAppearance,
       selectSurfaceAtImagePoint,
       setActiveSurface,
       removeSurface,
       reorderSurfaces,
       setFootprintExtent,
       setBrushConfig,
+      setPaintMode,
+      setTexturePreservation,
       setPaintOverlayOptions,
       commitBrushStroke,
       commitBrushStrokeBatch,
@@ -435,12 +498,16 @@ export function EditorProvider({ children }: { children: ReactNode }) {
       setViewMode,
       generateGeometry,
       cancelGeometry,
+      generateAppearance,
+      cancelAppearance,
       selectSurfaceAtImagePoint,
       setActiveSurface,
       removeSurface,
       reorderSurfaces,
       setFootprintExtent,
       setBrushConfig,
+      setPaintMode,
+      setTexturePreservation,
       setPaintOverlayOptions,
       commitBrushStroke,
       commitBrushStrokeBatch,

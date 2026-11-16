@@ -15,10 +15,13 @@ import {
   type PaintDocumentState,
 } from '../painting/paintDocument';
 import type {
+  AppearanceData,
+  AppearanceState,
   EditorTool,
   GeometryData,
   GeometryState,
   LoadedImage,
+  PaintMode,
   Point2D,
   Size2D,
   ViewMode,
@@ -37,6 +40,7 @@ export interface EditorState {
   activeTool: EditorTool;
   viewMode: ViewMode;
   geometry: GeometryState;
+  appearance: AppearanceState;
   paint: PaintDocumentState;
 }
 
@@ -56,6 +60,10 @@ export type EditorAction =
   | { type: 'GEOMETRY_SUCCESS'; data: GeometryData }
   | { type: 'GEOMETRY_ERROR'; imageId: string; message: string }
   | { type: 'GEOMETRY_CANCEL' }
+  | { type: 'APPEARANCE_START' }
+  | { type: 'APPEARANCE_SUCCESS'; data: AppearanceData }
+  | { type: 'APPEARANCE_ERROR'; imageId: string; message: string }
+  | { type: 'APPEARANCE_CANCEL' }
   | { type: 'PAINT_SELECT_SURFACE_START' }
   | { type: 'PAINT_SELECT_SURFACE'; selection: SurfaceSelectionResult }
   | { type: 'PAINT_SELECT_SURFACE_ERROR'; reason: string }
@@ -64,6 +72,8 @@ export type EditorAction =
   | { type: 'PAINT_REORDER_SURFACES'; fromIndex: number; toIndex: number }
   | { type: 'PAINT_SET_FOOTPRINT_EXTENT'; surfaceId: string; extentScale: number }
   | { type: 'PAINT_SET_BRUSH_CONFIG'; patch: Partial<BrushUiConfig> }
+  | { type: 'PAINT_SET_MODE'; mode: PaintMode }
+  | { type: 'PAINT_SET_TEXTURE_PRESERVATION'; value: number }
   | {
       type: 'PAINT_SET_OVERLAY_OPTIONS';
       patch: { showSupportOverlay?: boolean; showFootprintPreview?: boolean };
@@ -81,6 +91,12 @@ const IDLE_GEOMETRY: GeometryState = {
   error: null,
 };
 
+const IDLE_APPEARANCE: AppearanceState = {
+  status: 'idle',
+  data: null,
+  error: null,
+};
+
 export const initialEditorState: EditorState = {
   image: null,
   isLoading: false,
@@ -92,6 +108,7 @@ export const initialEditorState: EditorState = {
   activeTool: 'pointer',
   viewMode: 'rgb',
   geometry: IDLE_GEOMETRY,
+  appearance: IDLE_APPEARANCE,
   paint: PaintDocument.createInitial(),
 };
 
@@ -131,7 +148,12 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
         activeTool: resetPaintToolOnReset(state.activeTool),
         viewMode: 'rgb',
         geometry: IDLE_GEOMETRY,
-        paint: PaintDocument.createInitial(state.paint.brushConfig),
+        appearance: IDLE_APPEARANCE,
+        paint: PaintDocument.createInitial(
+          state.paint.brushConfig,
+          state.paint.paintMode,
+          state.paint.texturePreservation,
+        ),
       };
     }
 
@@ -272,6 +294,16 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
       if (action.mode === 'rgb') {
         return state.viewMode === 'rgb' ? state : { ...state, viewMode: 'rgb' };
       }
+      if (action.mode === 'albedo' || action.mode === 'shading' || action.mode === 'residual') {
+        const readyAppearance = state.appearance.status === 'ready' ? state.appearance.data : null;
+        if (!readyAppearance) {
+          return state;
+        }
+        return {
+          ...state,
+          viewMode: action.mode,
+        };
+      }
       const readyData = state.geometry.status === 'ready' ? state.geometry.data : null;
       if (!readyData) {
         return state;
@@ -298,7 +330,11 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
           data: null,
           error: null,
         },
-        paint: PaintDocument.createInitial(state.paint.brushConfig),
+        paint: PaintDocument.createInitial(
+          state.paint.brushConfig,
+          state.paint.paintMode,
+          state.paint.texturePreservation,
+        ),
       };
     }
 
@@ -335,7 +371,68 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
         activeTool: resetPaintToolOnReset(state.activeTool),
         viewMode: 'rgb',
         geometry: IDLE_GEOMETRY,
-        paint: PaintDocument.createInitial(state.paint.brushConfig),
+        paint: PaintDocument.createInitial(
+          state.paint.brushConfig,
+          state.paint.paintMode,
+          state.paint.texturePreservation,
+        ),
+      };
+    }
+
+    case 'APPEARANCE_START': {
+      if (!state.image) {
+        return state;
+      }
+      const resetView =
+        state.viewMode === 'albedo' ||
+        state.viewMode === 'shading' ||
+        state.viewMode === 'residual';
+      return {
+        ...state,
+        viewMode: resetView ? 'rgb' : state.viewMode,
+        appearance: {
+          status: 'loading',
+          data: null,
+          error: null,
+        },
+      };
+    }
+
+    case 'APPEARANCE_SUCCESS':
+      if (!state.image || state.image.id !== action.data.imageId) {
+        return state;
+      }
+      return {
+        ...state,
+        appearance: {
+          status: 'ready',
+          data: action.data,
+          error: null,
+        },
+      };
+
+    case 'APPEARANCE_ERROR':
+      if (!state.image || state.image.id !== action.imageId) {
+        return state;
+      }
+      return {
+        ...state,
+        appearance: {
+          status: 'error',
+          data: null,
+          error: action.message,
+        },
+      };
+
+    case 'APPEARANCE_CANCEL': {
+      const resetView =
+        state.viewMode === 'albedo' ||
+        state.viewMode === 'shading' ||
+        state.viewMode === 'residual';
+      return {
+        ...state,
+        viewMode: resetView ? 'rgb' : state.viewMode,
+        appearance: IDLE_APPEARANCE,
       };
     }
 
@@ -400,6 +497,18 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
       return {
         ...state,
         paint: PaintDocument.setBrushConfig(state.paint, action.patch),
+      };
+
+    case 'PAINT_SET_MODE':
+      return {
+        ...state,
+        paint: PaintDocument.setPaintMode(state.paint, action.mode),
+      };
+
+    case 'PAINT_SET_TEXTURE_PRESERVATION':
+      return {
+        ...state,
+        paint: PaintDocument.setTexturePreservation(state.paint, action.value),
       };
 
     case 'PAINT_SET_OVERLAY_OPTIONS':

@@ -58,9 +58,14 @@ export type EditorTool = 'pointer' | 'hand' | 'select-surface' | 'brush' | 'eras
 
 export type ZoomMode = 'fit' | 'custom';
 
-export type ViewMode = 'rgb' | 'depth' | 'normals' | 'mask' | 'pointcloud';
+export type ViewMode =
+  'rgb' | 'depth' | 'normals' | 'mask' | 'pointcloud' | 'albedo' | 'shading' | 'residual';
 
 export type GeometryStatus = 'idle' | 'loading' | 'ready' | 'error';
+
+export type AppearanceStatus = 'idle' | 'loading' | 'ready' | 'error';
+
+export type PaintMode = 'flat' | 'shading' | 'texture';
 
 export interface GeometryArraySpec {
   shape: number[];
@@ -110,5 +115,51 @@ export interface GeometryData {
 export interface GeometryState {
   status: GeometryStatus;
   data: GeometryData | null;
+  error: string | null;
+}
+
+export interface AppearanceMetadata {
+  id: string;
+  cache_version: number;
+  image_sha256: string;
+  model_id: string;
+  denoising_steps: number;
+  processing_resolution: number;
+  ensemble_size: number;
+  seed: number;
+  use_fp16: boolean;
+  max_image_size: number;
+  original_width: number;
+  original_height: number;
+  appearance_width: number;
+  appearance_height: number;
+  prediction_space: string;
+  scale_conventions: Record<string, string>;
+  albedo_range: [number, number] | null;
+  shading_range: [number, number] | null;
+  residual_range: [number, number] | null;
+  cached: boolean;
+  arrays: Record<string, GeometryArraySpec>;
+}
+
+export interface AppearancePreviews {
+  albedo: HTMLCanvasElement;
+  shading: HTMLCanvasElement;
+  residual: HTMLCanvasElement;
+}
+
+export interface AppearanceData {
+  imageId: string;
+  metadata: AppearanceMetadata;
+  albedo: Float32Array;
+  shading: Float32Array;
+  residual: Float32Array;
+  linearReference: Float32Array;
+  previews: AppearancePreviews;
+}
+
+export interface AppearanceState {
+  status: AppearanceStatus;
+  data: AppearanceData | null;
   error: string | null;
 }
