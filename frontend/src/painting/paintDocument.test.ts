@@ -1,10 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildSyntheticSurfaceSelection,
+  createSyntheticCylinderScene,
   createSyntheticPlanarScene,
 } from '../geometry/testFixtures';
+import { ArtworkModel } from './artwork';
+import { createAutomaticArtworkPlacement } from './artworkPlacement';
 import type { BrushStroke } from './brushEngine';
+import { rebuildImageLayerRgba, type ImageSpaceStroke } from './imageSpacePaint';
 import { PaintDocument } from './paintDocument';
+import type { PlanarDecalSurface } from './planarDecal';
 import {
   computeDecalTextureSpec,
   decalTexelToPlaneCoords,
@@ -143,5 +148,211 @@ describe('PaintDocument & PlanarDecal', () => {
     expect(ndc[1]).toBeCloseTo(0.5, 6);
     expect(ndc[2]).toBeCloseTo(0, 6);
     expect(ndc[3]).toBeCloseTo(0, 6);
+  });
+
+  it('commits mixed planar, curved, and 2D strokes atomically, syncs brush pixelSize, and layers image paint + erase cleanly', () => {
+    let doc = PaintDocument.createInitial();
+    doc = PaintDocument.setBrushConfig(doc, { pixelSize: 72 });
+    expect(doc.brushConfig.pixelSize).toBe(72);
+    expect(doc.brushConfig.sizeMultiplier).toBeCloseTo(2.0, 4);
+
+    // 1. 2D fallback stroke before any surface exists.
+    const mask2d = new Uint8Array(100).fill(255);
+    const stroke2d: ImageSpaceStroke = {
+      id: 'img-2d-1',
+      layer: 'fallback-2d',
+      mode: 'paint',
+      brush: { diameter: 20, color: '#ff0000', opacity: 1, hardness: 1 },
+      layerWidth: 20,
+      layerHeight: 20,
+      bounds: { minX: 0, minY: 0, maxX: 9, maxY: 9 },
+      alphaMask: mask2d,
+    };
+    doc = PaintDocument.commitAutoStroke(doc, {
+      anchorMode: 'fallback-2d',
+      imageStroke: stroke2d,
+    });
+    expect(doc.lastAnchorMode).toBe('fallback-2d');
+    expect(doc.imageStrokes.length).toBe(1);
+
+    // 2. Curved paint stroke + curved erase stroke.
+    const curvedPaint: ImageSpaceStroke = {
+      id: 'img-curved-1',
+      layer: 'curved',
+      mode: 'paint',
+      brush: { diameter: 20, color: '#00ff88', opacity: 0.8, hardness: 1 },
+      layerWidth: 20,
+      layerHeight: 20,
+      bounds: { minX: 0, minY: 0, maxX: 9, maxY: 9 },
+      alphaMask: new Uint8Array(100).fill(255),
+    };
+    const curvedErase: ImageSpaceStroke = {
+      id: 'img-curved-2',
+      layer: 'curved',
+      mode: 'erase',
+      brush: { diameter: 10, color: '#00ff88', opacity: 1, hardness: 1 },
+      layerWidth: 20,
+      layerHeight: 20,
+      bounds: { minX: 0, minY: 0, maxX: 3, maxY: 3 },
+      alphaMask: new Uint8Array(16).fill(255),
+    };
+    doc = PaintDocument.commitAutoStroke(doc, { anchorMode: 'curved', imageStroke: curvedPaint });
+    doc = PaintDocument.commitAutoStroke(doc, { anchorMode: 'curved', imageStroke: curvedErase });
+    expect(doc.imageStrokes.length).toBe(3);
+
+    const curvedRgba = rebuildImageLayerRgba(
+      doc.imageStrokes.filter((s) => s.layer === 'curved'),
+      { width: 20, height: 20 },
+    );
+    // Pixel (1, 1) was erased cleanly while (7, 7) retains curved paint!
+    expect(curvedRgba[(1 * 20 + 1) * 4 + 3]).toBe(0);
+    expect(curvedRgba[(7 * 20 + 7) * 4 + 3]).toBeGreaterThan(180);
+
+    // 3. Auto planar surface + stroke committed together in one atomic step.
+    const sel = createTestSelection();
+    const autoSurface: PlanarDecalSurface = {
+      id: 'auto-surf-1',
+      label: 'Surface 1',
+      colorIndex: 0,
+      frame: sel.frame,
+      baseFootprint: sel.suggestedFootprint,
+      extentScale: 1,
+      supportMask: sel.supportMask,
+      inlierCount: sel.inlierCount,
+      rmsError: sel.rmsError,
+      referenceBrushDiameter: sel.referenceBrushDiameter,
+    };
+    doc = PaintDocument.commitAutoStroke(doc, {
+      anchorMode: 'planar',
+      newPlanarSurface: autoSurface,
+      planarStroke: {
+        id: 'planar-1',
+        surfaceId: autoSurface.id,
+        mode: 'paint',
+        brush: { diameter: 0.2, color: '#3388ff', opacity: 0.9, hardness: 0.8 },
+        points: [{ u: 0, v: 0 }],
+      },
+    });
+    expect(doc.surfaces.length).toBe(1);
+    expect(doc.strokes.length).toBe(1);
+    expect(doc.lastAnchorMode).toBe('planar');
+
+    // Undo cleanly reverts planar stroke + auto surface together, then curved erase.
+    doc = PaintDocument.undo(doc);
+    expect(doc.surfaces.length).toBe(0);
+    expect(doc.strokes.length).toBe(0);
+    expect(doc.lastAnchorMode).toBe('curved');
+
+    doc = PaintDocument.redo(doc);
+    expect(doc.surfaces.length).toBe(1);
+    expect(doc.strokes.length).toBe(1);
+    expect(doc.lastAnchorMode).toBe('planar');
+  });
+
+  it('keeps independent artwork assets reusable across placements and edits artwork without disturbing placement transforms or existing brush strokes', () => {
+    const scene = createSyntheticPlanarScene({
+      width: 32,
+      height: 32,
+      planeOrigin: [0, 0, 3.0],
+      planeNormal: [0, 0, -1],
+    });
+    let doc = PaintDocument.createInitial();
+
+    // Commit an existing fallback-2d brush stroke first.
+    doc = PaintDocument.commitAutoStroke(doc, {
+      anchorMode: 'fallback-2d',
+      imageStroke: {
+        id: 'existing-brush',
+        layer: 'fallback-2d',
+        mode: 'paint',
+        brush: { diameter: 20, color: '#ff0000', opacity: 1, hardness: 1 },
+        layerWidth: 64,
+        layerHeight: 64,
+        bounds: { minX: 0, minY: 0, maxX: 5, maxY: 5 },
+        alphaMask: new Uint8Array(36).fill(255),
+      },
+    });
+
+    // Create blank artwork, draw a stroke, and place it twice cleanly.
+    let art = ArtworkModel.createBlank({ name: 'Logo', width: 64, height: 64 });
+    art = ArtworkModel.commitDrawnStroke(art, {
+      id: 'art-s1',
+      surfaceId: art.id,
+      mode: 'paint',
+      brush: { diameter: 12, color: '#00aaff', opacity: 1, hardness: 1 },
+      points: [{ u: 32, v: 32 }],
+    });
+    doc = PaintDocument.addArtwork(doc, art);
+
+    const p1 = createAutomaticArtworkPlacement({
+      artwork: art,
+      imagePoint: { x: 16, y: 16 },
+      imageSize: { width: 320, height: 320 },
+      geometry: scene.geometry,
+      label: 'Logo #1',
+    });
+    const p2 = createAutomaticArtworkPlacement({
+      artwork: art,
+      imagePoint: { x: 240, y: 240 },
+      imageSize: { width: 320, height: 320 },
+      geometry: scene.geometry,
+      label: 'Logo #2',
+    });
+    doc = PaintDocument.addPlacement(doc, p1);
+    doc = PaintDocument.addPlacement(doc, p2);
+    expect(doc.artworkPlacements.length).toBe(2);
+    expect(doc.activePlacementId).toBe(p2.id);
+
+    // Transform placement #2 and verify undo/redo restores it without disturbing brush strokes.
+    doc = PaintDocument.updatePlacement(doc, { ...p2, scale: 2.0, rotationRad: 0.7 }, true);
+    expect(PaintDocument.getActivePlacement(doc)?.scale).toBe(2.0);
+    doc = PaintDocument.undo(doc);
+    expect(PaintDocument.getActivePlacement(doc)?.scale).toBe(p2.scale);
+    expect(doc.imageStrokes.length).toBe(1);
+    doc = PaintDocument.redo(doc);
+    expect(PaintDocument.getActivePlacement(doc)?.scale).toBe(2.0);
+
+    // Editing the source artwork increments revision while keeping both placements' transforms intact.
+    const editedArt = ArtworkModel.commitDrawnStroke(art, {
+      id: 'art-s2',
+      surfaceId: art.id,
+      mode: 'paint',
+      brush: { diameter: 10, color: '#ffffff', opacity: 1, hardness: 1 },
+      points: [{ u: 20, v: 20 }],
+    });
+    doc = PaintDocument.updateArtwork(doc, editedArt);
+    expect(PaintDocument.getArtworkById(doc, art.id)?.revision).toBe(art.revision + 1);
+    expect(doc.artworkPlacements[0]?.artworkId).toBe(art.id);
+    expect(doc.artworkPlacements[1]?.scale).toBe(2.0);
+    expect(doc.imageStrokes.length).toBe(1);
+
+    // Removing placement #2 leaves placement #1 and brush strokes clean, and undoing restores placement #2.
+    doc = PaintDocument.removePlacement(doc, p2.id);
+    expect(doc.artworkPlacements.length).toBe(1);
+    doc = PaintDocument.undo(doc);
+    expect(doc.artworkPlacements.length).toBe(2);
+
+    // Curved placement on a cylinder shares undo/redo and source artwork reactivity cleanly.
+    const cylScene = createSyntheticCylinderScene({
+      width: 64,
+      height: 64,
+      axisCenter: [0, 0, 2.2],
+      radius: 0.85,
+    });
+    const curvedPlacement = createAutomaticArtworkPlacement({
+      artwork: editedArt,
+      imagePoint: { x: 320, y: 320 },
+      imageSize: { width: 640, height: 640 },
+      geometry: cylScene.geometry,
+      label: 'Logo Curved',
+    });
+    expect(curvedPlacement.mapping.type).toBe('curved');
+    doc = PaintDocument.addPlacement(doc, curvedPlacement);
+    expect(doc.artworkPlacements.length).toBe(3);
+    doc = PaintDocument.undo(doc);
+    expect(doc.artworkPlacements.length).toBe(2);
+    doc = PaintDocument.redo(doc);
+    expect(doc.artworkPlacements.length).toBe(3);
+    expect(doc.artworkPlacements[2]?.mapping.type).toBe('curved');
   });
 });

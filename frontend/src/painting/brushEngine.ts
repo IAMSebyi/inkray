@@ -53,7 +53,7 @@ export function parseHexColorRgb(hex: string): [number, number, number] {
   return [255, 77, 77];
 }
 
-function pointToSegmentDistanceSq(
+export function pointToSegmentDistanceSq(
   pu: number,
   pv: number,
   au: number,
@@ -77,7 +77,7 @@ function pointToSegmentDistanceSq(
   return du * du + dv * dv;
 }
 
-function computeBrushFalloff(dist: number, radius: number, hardness: number): number {
+export function computeBrushFalloff(dist: number, radius: number, hardness: number): number {
   if (dist >= radius || radius <= 0) {
     return 0;
   }

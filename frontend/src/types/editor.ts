@@ -56,6 +56,8 @@ export interface ImageCoordinateSample {
 
 export type EditorTool = 'pointer' | 'hand' | 'select-surface' | 'brush' | 'eraser';
 
+export type WorkspaceMode = 'photo' | 'artwork';
+
 export type ZoomMode = 'fit' | 'custom';
 
 export type ViewMode =
