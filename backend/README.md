@@ -17,6 +17,34 @@ Python + FastAPI inference service for Inkray, providing monocular geometry esti
 
 ## Setup
 
+Choose either **Anaconda / Miniconda** (recommended) or a standard Python `venv`.
+
+### Option A: Anaconda / Miniconda
+
+1. Create and activate a dedicated Conda environment with Python 3.10:
+   ```bash
+   conda create -n inkray python=3.10 -y
+   conda activate inkray
+   ```
+2. Install PyTorch (`CUDA` build recommended, or CPU build if no NVIDIA GPU is present):
+   ```bash
+   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+   ```
+   *(For CPU-only systems, use `pip install torch torchvision`.)*
+3. Install the official MoGe package and Inkray backend dependencies:
+   ```bash
+   cd backend
+   pip install "git+https://github.com/microsoft/MoGe.git"
+   pip install -e ".[dev]"
+   ```
+4. Verify installation and start the API server from the activated `inkray` environment:
+   ```bash
+   pytest -v
+   uvicorn app.main:app --host 127.0.0.1 --port 8000
+   ```
+
+### Option B: Python `venv`
+
 Create a virtual environment inside `backend/.venv`, install PyTorch for your CUDA version (or CPU), and install MoGe + backend dependencies (including `diffusers`, `transformers`, `accelerate`, and `safetensors`):
 
 ```bash
@@ -71,9 +99,12 @@ cd backend
 .venv/bin/python scripts/evaluate_appearance.py
 ```
 
-## Model Attribution & License Note
+## Model Attribution & License Notes
 
-`prs-eth/marigold-iid-lighting-v1-1` is released under the **CreativeML OpenRAIL++-M** license (distinct from Diffusers' Apache-2.0 license and Inkray's repository license). Any redistribution or deployment of the pretrained checkpoint or generated derivatives must follow the upstream model license restrictions.
+- **MoGe-3 (`Ruicheng/moge-3-vitl` / `microsoft/MoGe`):** Licensed under the **MIT License** (Copyright Microsoft Corporation). Certain bundled or upstream backbone components (such as DINOv2 elements) carry **Apache License 2.0**.
+- **Marigold IID Lighting v1.1 (`prs-eth/marigold-iid-lighting-v1-1`):** Run via **Hugging Face Diffusers** (Apache-2.0), while the pretrained model checkpoint itself is released under the **CreativeML OpenRAIL++-M** license, which includes usage and redistribution terms separate from Inkray's MIT license.
+
+Any redistribution or deployment of downloaded pretrained checkpoints or generated derivatives must comply with their respective upstream license terms.
 
 ## Planned Extensions
 

@@ -27,8 +27,8 @@ Inkray implements monocular 3D geometry inference, intrinsic lighting decomposit
   - High-DPI viewport with cursor-anchored wheel/trackpad zoom, middle-mouse and `Space + left-drag` panning, Fit to Screen, 100% zoom, and resize handling.
   - Python + FastAPI backend integrating **MoGe-3** (`Ruicheng/moge-3-vitl`) for monocular depth, surface normals, 3D point maps, valid mask, and normalized camera intrinsics, and **Marigold IID Lighting v1.1** (`prs-eth/marigold-iid-lighting-v1-1`) via Hugging Face Diffusers for intrinsic albedo, diffuse shading, and non-diffuse residual estimation.
   - Content-addressed disk caching of inferred geometry and appearance layers (`.npz` + metadata JSON) with binary array HTTP endpoints (`float32` / `uint8`), sequential GPU memory management, and request cancellation.
-  - Viewport visualization modes (`RGB`, `Depth`, `Normals`, `Mask`, interactive `3D` `Points | 2.5D Mesh` viewer, `Albedo`, `Shading`, `Residual`), plus live cursor depth sampling.
-  - Geometry-aware and lighting-aware planar painting: single-request backend NumPy/SciPy RANSAC + connected surface region growing (`POST /api/geometry/{id}/surface/select`), client-side stable plane coordinate frames, deterministic per-surface shading calibration, linear-RGB WebGL2 compositing (`Flat`, `Shading`, and `Texture` modes with configurable `Texture Detail`), depth/normal foreground occlusion handling, anti-accumulation single-stroke brush compositing, cross-surface undo/redo history, and full-resolution PNG export.
+  - Viewport visualization modes (`RGB`, `Depth`, `Normals`, `Mask`, interactive `3D` Points, `Mesh` 2.5D triangle mesh, `Albedo`, `Shading`, `Residual`), plus live cursor depth sampling.
+  - Geometry-aware and lighting-aware planar painting: single-request backend NumPy/SciPy RANSAC + connected surface region growing (`POST /api/geometry/{id}/surface/select`), client-side stable plane coordinate frames, deterministic per-surface shading calibration, linear-RGB WebGL2 compositing (`Flat`, `Shading`, and `Texture` modes with configurable `Texture Detail`), depth/normal foreground occlusion handling, anti-accumulation single-stroke brush compositing, cross-surface undo/redo history, one-click `Final View` overlay hiding, and full-resolution PNG export.
 - **Not Yet Implemented:**
   - Physically accurate relighting or synthetic light insertion, SAM 2 interactive segmentation, curved-surface painting, and named paint layers.
 
@@ -91,9 +91,15 @@ npm install
 
 ### Install and Run the Backend
 
-See [backend/README.md](backend/README.md) for full Python environment setup (PyTorch CUDA + official MoGe-3 package). Once `backend/.venv` is configured:
+See [backend/README.md](backend/README.md) for full Python environment setup using **Anaconda / Miniconda** (recommended) or `venv`, PyTorch CUDA installation, and MoGe-3 + Marigold setup:
 
 ```bash
+# With Anaconda / Miniconda (after following backend/README.md setup)
+conda activate inkray
+cd backend
+uvicorn app.main:app --host 127.0.0.1 --port 8000
+
+# Or with venv
 cd backend
 .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
@@ -138,7 +144,8 @@ npm run build
 4. Open the **Surfaces** tab in the right sidebar to drag-and-drop surface priorities (`#1` wins overlapping intersections), adjust **Footprint Extent** (`50%`-`250%`), or toggle ownership overlays.
 5. In the **Intrinsic Lighting** inspector section, switch live compositing between **Flat**, **Shading** (diffuse shadow/illumination preservation), and **Texture** (illuminated micro-texture transfer via the **Texture Detail** slider).
 6. Switch manually to **Surface Brush** (`B`) or **Surface Eraser** (`E`). Paint or erase continuously across selected planes with a live perspective brush ring, automatic foreground depth occlusion, and atomic cross-surface strokes.
-7. Use **Undo** (`Ctrl/Cmd + Z`), **Redo** (`Ctrl/Cmd + Shift + Z`), or **Export PNG** (opens a Save dialog where supported, or downloads `<name>-inkray.png`) while staying in the live RGB painting viewport.
+7. Toggle **Final View** (`P`) in the top toolbar at any time to hide surface tints and footprint borders and inspect the clean composited image while painting.
+8. Use **Undo** (`Ctrl/Cmd + Z`), **Redo** (`Ctrl/Cmd + Shift + Z`), or **Export PNG** (opens a Save dialog where supported, or downloads `<name>-inkray.png`) while staying in the live RGB painting viewport.
 
 ### Keyboard Shortcuts
 
@@ -152,6 +159,7 @@ npm run build
 | `S` | Select Planar Surface tool (after geometry is ready) |
 | `B` | Surface Brush tool (after selecting at least one plane) |
 | `E` | Surface Eraser tool (after selecting at least one plane) |
+| `P` | Toggle clean Final View (hide / show surface overlays) |
 | `[` / `]` | Decrease / increase brush size |
 | `Ctrl/Cmd + Z` | Undo painting, surface add/remove, or priority reorder |
 | `Ctrl/Cmd + Shift + Z` or `Ctrl + Y` | Redo |
@@ -159,10 +167,15 @@ npm run build
 | `1` or `Ctrl/Cmd + 1` | Zoom to 100% (1 source pixel = 1 CSS pixel) |
 | `+` / `-` | Zoom in / out |
 
-### Model Attribution & Licensing Notes
+### Contributing
 
-- **MoGe-3** (`Ruicheng/moge-3-vitl`) provides monocular depth, normals, point maps, and intrinsics.
-- **Marigold IID Lighting v1.1** (`prs-eth/marigold-iid-lighting-v1-1`), run via **Hugging Face Diffusers** (`MarigoldIntrinsicsPipeline`), is licensed under **CreativeML OpenRAIL++-M**, which carries separate usage restrictions from Inkray's source code and Apache-2.0 library dependencies. Users deploying or redistributing model outputs are responsible for complying with the model card license terms.
+Contributions via issues and pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines and verification commands.
+
+### License & Model Attribution
+
+- **Inkray source code:** Licensed under the [MIT License](LICENSE).
+- **MoGe-3 (`Ruicheng/moge-3-vitl` / `microsoft/MoGe`):** Licensed under the MIT License (with upstream backbone elements under Apache License 2.0). See [backend/README.md](backend/README.md).
+- **Marigold IID Lighting v1.1 (`prs-eth/marigold-iid-lighting-v1-1`):** Run via **Hugging Face Diffusers** (`MarigoldIntrinsicsPipeline`), and licensed under **CreativeML OpenRAIL++-M**, which carries separate usage restrictions from Inkray's MIT license. Users deploying or redistributing model weights or outputs are responsible for complying with the upstream license terms.
 
 ### Known Limitations
 
