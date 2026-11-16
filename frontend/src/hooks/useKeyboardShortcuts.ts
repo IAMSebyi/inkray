@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useEditor } from './useEditor';
 
 function isEditableElement(target: EventTarget | null): boolean {
@@ -6,20 +6,45 @@ function isEditableElement(target: EventTarget | null): boolean {
     return false;
   }
   const tagName = target.tagName;
-  return (
-    tagName === 'INPUT' ||
-    tagName === 'TEXTAREA' ||
-    tagName === 'SELECT' ||
-    target.isContentEditable
-  );
+  if (tagName === 'TEXTAREA' || tagName === 'SELECT' || target.isContentEditable) {
+    return true;
+  }
+  if (target instanceof HTMLInputElement) {
+    const inputType = target.type.toLowerCase();
+    return (
+      inputType === 'text' ||
+      inputType === 'search' ||
+      inputType === 'url' ||
+      inputType === 'tel' ||
+      inputType === 'email' ||
+      inputType === 'password' ||
+      inputType === 'number'
+    );
+  }
+  return false;
 }
 
 export function useKeyboardShortcuts(): { isSpacePressed: boolean } {
-  const { state, openFilePicker, fitToScreen, zoomToActualSize, zoomIn, zoomOut, setActiveTool } =
-    useEditor();
+  const {
+    state,
+    openFilePicker,
+    fitToScreen,
+    zoomToActualSize,
+    zoomIn,
+    zoomOut,
+    setActiveTool,
+    setBrushConfig,
+    undoPaint,
+    redoPaint,
+  } = useEditor();
   const [isSpacePressed, setIsSpacePressed] = useState(false);
 
   const hasImage = state.image !== null;
+  const brushSizeRef = useRef(state.paint.brushConfig.sizeMultiplier);
+
+  useEffect(() => {
+    brushSizeRef.current = state.paint.brushConfig.sizeMultiplier;
+  }, [state.paint.brushConfig.sizeMultiplier]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -43,6 +68,24 @@ export function useKeyboardShortcuts(): { isSpacePressed: boolean } {
         return;
       }
 
+      if (hasPrimaryMod && !event.altKey) {
+        const lower = event.key.toLowerCase();
+        if (lower === 'z' || event.code === 'KeyZ') {
+          event.preventDefault();
+          if (event.shiftKey) {
+            redoPaint();
+          } else {
+            undoPaint();
+          }
+          return;
+        }
+        if ((lower === 'y' || event.code === 'KeyY') && !event.shiftKey) {
+          event.preventDefault();
+          redoPaint();
+          return;
+        }
+      }
+
       if (!hasPrimaryMod && !event.altKey && !event.shiftKey) {
         const lower = event.key.toLowerCase();
         if (lower === 'o') {
@@ -56,6 +99,26 @@ export function useKeyboardShortcuts(): { isSpacePressed: boolean } {
         }
         if (lower === 'h') {
           setActiveTool('hand');
+          return;
+        }
+        if (lower === 's') {
+          setActiveTool('select-surface');
+          return;
+        }
+        if (lower === 'b') {
+          setActiveTool('brush');
+          return;
+        }
+        if (lower === 'e') {
+          setActiveTool('eraser');
+          return;
+        }
+        if (event.key === '[') {
+          setBrushConfig({ sizeMultiplier: brushSizeRef.current * 0.85 });
+          return;
+        }
+        if (event.key === ']') {
+          setBrushConfig({ sizeMultiplier: brushSizeRef.current * 1.18 });
           return;
         }
       }
@@ -119,7 +182,18 @@ export function useKeyboardShortcuts(): { isSpacePressed: boolean } {
       window.removeEventListener('blur', resetSpace);
       document.removeEventListener('visibilitychange', resetSpace);
     };
-  }, [hasImage, openFilePicker, fitToScreen, zoomToActualSize, zoomIn, zoomOut, setActiveTool]);
+  }, [
+    hasImage,
+    openFilePicker,
+    fitToScreen,
+    zoomToActualSize,
+    zoomIn,
+    zoomOut,
+    setActiveTool,
+    setBrushConfig,
+    undoPaint,
+    redoPaint,
+  ]);
 
   return { isSpacePressed };
 }

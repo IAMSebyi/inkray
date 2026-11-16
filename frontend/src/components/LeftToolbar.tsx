@@ -1,13 +1,17 @@
-import { Crosshair, Hand, Lasso, MousePointer2, Paintbrush } from 'lucide-react';
+import { Crosshair, Eraser, Hand, Lasso, MousePointer2, Paintbrush } from 'lucide-react';
 import { useEditor } from '../hooks/useEditor';
+import type { EditorTool } from '../types/editor';
 
 export function LeftToolbar() {
   const { state, setActiveTool } = useEditor();
 
-  const handleSelectTool = (
-    event: React.MouseEvent<HTMLButtonElement>,
-    tool: 'pointer' | 'hand',
-  ) => {
+  const hasGeometry = state.geometry.status === 'ready' && state.geometry.data !== null;
+  const isPointCloud = state.viewMode === 'pointcloud' && state.geometry.data !== null;
+  const hasSurfaces = state.paint.surfaces.length > 0;
+  const canSelectSurface = hasGeometry && !isPointCloud;
+  const canPaint = canSelectSurface && hasSurfaces;
+
+  const handleSelectTool = (event: React.MouseEvent<HTMLButtonElement>, tool: EditorTool) => {
     event.currentTarget.blur();
     setActiveTool(tool);
   };
@@ -40,35 +44,79 @@ export function LeftToolbar() {
 
       <div className="tool-rail-divider" aria-hidden="true" />
 
-      <div className="tool-rail-group" aria-label="Planned tools">
+      <div className="tool-rail-group" aria-label="Surface painting tools">
         <button
           type="button"
-          className="tool-button is-disabled"
-          disabled
-          aria-label="Surface Brush (planned)"
-          title="Surface Brush (planned)"
+          className={`tool-button ${!canSelectSurface ? 'is-disabled' : ''} ${
+            state.activeTool === 'select-surface' ? 'is-active' : ''
+          }`}
+          disabled={!canSelectSurface}
+          onClick={(e) => handleSelectTool(e, 'select-surface')}
+          aria-label="Select Planar Surface tool"
+          aria-pressed={state.activeTool === 'select-surface'}
+          title={
+            !hasGeometry
+              ? 'Select Planar Surface (S) - generate geometry first'
+              : isPointCloud
+                ? 'Select Planar Surface (S) - switch to a 2D view mode first'
+                : 'Select Planar Surface (S)'
+          }
+        >
+          <Crosshair size={16} strokeWidth={1.75} />
+        </button>
+
+        <button
+          type="button"
+          className={`tool-button ${!canPaint ? 'is-disabled' : ''} ${
+            state.activeTool === 'brush' ? 'is-active' : ''
+          }`}
+          disabled={!canPaint}
+          onClick={(e) => handleSelectTool(e, 'brush')}
+          aria-label="Surface Brush tool"
+          aria-pressed={state.activeTool === 'brush'}
+          title={
+            !hasGeometry
+              ? 'Surface Brush (B) - generate geometry first'
+              : !hasSurfaces
+                ? 'Surface Brush (B) - select a planar surface first'
+                : 'Surface Brush (B)'
+          }
         >
           <Paintbrush size={16} strokeWidth={1.75} />
         </button>
 
         <button
           type="button"
-          className="tool-button is-disabled"
-          disabled
-          aria-label="Surface Selection (planned)"
-          title="Surface Selection - SAM 2 (planned)"
+          className={`tool-button ${!canPaint ? 'is-disabled' : ''} ${
+            state.activeTool === 'eraser' ? 'is-active' : ''
+          }`}
+          disabled={!canPaint}
+          onClick={(e) => handleSelectTool(e, 'eraser')}
+          aria-label="Surface Eraser tool"
+          aria-pressed={state.activeTool === 'eraser'}
+          title={
+            !hasGeometry
+              ? 'Surface Eraser (E) - generate geometry first'
+              : !hasSurfaces
+                ? 'Surface Eraser (E) - select a planar surface first'
+                : 'Surface Eraser (E)'
+          }
         >
-          <Lasso size={16} strokeWidth={1.75} />
+          <Eraser size={16} strokeWidth={1.75} />
         </button>
+      </div>
 
+      <div className="tool-rail-divider" aria-hidden="true" />
+
+      <div className="tool-rail-group" aria-label="Planned tools">
         <button
           type="button"
           className="tool-button is-disabled"
           disabled
-          aria-label="Depth Probe (planned)"
-          title="3D Depth Probe - MoGe-3 (planned)"
+          aria-label="Surface Segmentation (planned)"
+          title="Surface Segmentation - SAM 2 (planned)"
         >
-          <Crosshair size={16} strokeWidth={1.75} />
+          <Lasso size={16} strokeWidth={1.75} />
         </button>
       </div>
     </aside>

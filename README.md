@@ -18,18 +18,19 @@ Inkray is an open-source, geometry-aware image editor inspired by Adobe's Projec
 
 ## Current Status
 
-Inkray currently implements the interactive 2D/3D viewport and monocular geometry inference backend:
+Inkray implements monocular 3D geometry inference, 2.5D mesh/point cloud visualization, and geometry-aware planar surface painting:
 
 - **Implemented:**
   - Frontend workspace (`React` + `TypeScript` + `Vite` + `Three.js`) with strict TypeScript checking, ESLint, Prettier, and Vitest.
   - Dark-themed editor layout (top toolbar, left tool rail, central viewport, right inspector sidebar, bottom status bar).
   - JPEG and PNG image importing via file picker and drag-and-drop, with format/header validation, error handling, non-destructive image replacement, and access to unmodified source pixels.
-  - High-DPI Canvas 2D viewport with cursor-anchored wheel/trackpad zoom, middle-mouse and `Space + left-drag` panning, Fit to Screen, 100% zoom, and resize handling.
+  - High-DPI viewport with cursor-anchored wheel/trackpad zoom, middle-mouse and `Space + left-drag` panning, Fit to Screen, 100% zoom, and resize handling.
   - Python + FastAPI backend integrating **MoGe-3** (`Ruicheng/moge-3-vitl`) for monocular depth, surface normals, 3D point maps, valid mask, and normalized camera intrinsics.
   - Content-addressed disk caching of inferred geometry (`.npz` + metadata JSON) with binary array HTTP endpoints (`float32` / `uint8`) and request cancellation.
-  - Viewport visualization modes (`RGB`, `Depth`, `Normals`, `Mask`, and interactive `3D` point cloud in Three.js with `OrbitControls`), plus live cursor depth sampling.
+  - Viewport visualization modes (`RGB`, `Depth`, `Normals`, `Mask`, and interactive `3D` `Points | 2.5D Mesh` viewer in Three.js with `OrbitControls`), plus live cursor depth sampling.
+  - Geometry-aware planar painting: single-request backend NumPy/SciPy RANSAC + connected surface region growing (`POST /api/geometry/{id}/surface/select`), client-side stable plane coordinate frames, perspective GPU decal projection via WebGL2 shaders, depth/normal foreground occlusion handling, anti-accumulation single-stroke brush compositing, cross-surface undo/redo history, and full-resolution PNG export.
 - **Not Yet Implemented:**
-  - Marigold IID intrinsic lighting decomposition, SAM 2 surface segmentation, 3D brush projection, occlusion-aware painting, lighting-aware compositing, and paint layers.
+  - Marigold IID intrinsic lighting decomposition, relighting-aware compositing, SAM 2 interactive segmentation, curved-surface painting, and named paint layers.
 
 ---
 
@@ -41,8 +42,10 @@ inkray/
 │   ├── src/
 │   │   ├── api/               # Binary HTTP client for backend geometry endpoints
 │   │   ├── components/        # UI panels, toolbars, and status bar
-│   │   ├── editor/            # 2D canvas renderer, 3D point cloud viewer, geometry previews, transforms
+│   │   ├── editor/            # 2D canvas renderer, 3D point/mesh viewer, previews, transforms
+│   │   ├── geometry/          # OpenCV geometry helpers, plane frame projection, and 2.5D mesh builder
 │   │   ├── hooks/             # Custom React hooks (resize, shortcuts, drag-and-drop import)
+│   │   ├── painting/          # Brush engine, decal parameterization, visibility math, GPU renderer, document history
 │   │   ├── state/             # Editor reducer, context provider, and cursor coordinate store
 │   │   ├── styles/            # Design tokens, global styles, and editor layout CSS
 │   │   ├── types/             # Shared TypeScript definitions
@@ -53,9 +56,9 @@ inkray/
 │   └── package.json
 ├── backend/                   # Python + FastAPI + PyTorch (MoGe-3) geometry service
 │   ├── app/
-│   │   ├── api/               # FastAPI routes for inference metadata and binary arrays
+│   │   ├── api/               # FastAPI routes for inference metadata, binary arrays, and surface selection
 │   │   ├── cache/             # Content-addressed disk cache for inferred geometry
-│   │   ├── geometry/          # Typed geometry containers and coordinate transforms
+│   │   ├── geometry/          # Typed geometry containers, transforms, RANSAC plane fitter, and surface selector
 │   │   ├── inference/         # Model wrapper abstraction and MoGe-3 implementation
 │   │   ├── utils/             # Pillow image decoding and EXIF orientation normalization
 │   │   ├── config.py          # Environment-driven backend configuration
@@ -126,7 +129,16 @@ npm run format:check
 npm run build
 ```
 
-### Keyboard Shortcuts (Viewport)
+### Geometry-Aware Painting Workflow
+
+1. Import a JPEG or PNG photograph (`O`) and click **Generate Geometry**.
+2. Optionally switch to `3D` view and toggle between **Points** and **2.5D Mesh** to inspect surface continuity.
+3. Activate **Select Planar Surface** (`S`) and click one or more planar regions (walls, floor, tabletops, facades) to add painting surfaces.
+4. Open the **Surfaces** tab in the right sidebar to drag-and-drop surface priorities (`#1` wins overlapping intersections), adjust **Footprint Extent** (`50%`-`250%`), or toggle ownership overlays.
+5. Switch manually to **Surface Brush** (`B`) or **Surface Eraser** (`E`). Paint or erase continuously across selected planes with a live perspective brush ring, automatic foreground depth occlusion, and atomic cross-surface strokes.
+6. Use **Undo** (`Ctrl/Cmd + Z`), **Redo** (`Ctrl/Cmd + Shift + Z`), or **Export PNG** (opens a Save dialog where supported, or downloads `<name>-inkray.png`) while staying in the live RGB painting viewport.
+
+### Keyboard Shortcuts
 
 | Shortcut | Action |
 | --- | --- |
@@ -135,6 +147,19 @@ npm run build
 | `Mouse Wheel` / `Trackpad Pinch` | Smooth zoom around cursor |
 | `V` | Pointer / inspect tool |
 | `H` | Hand (pan) tool |
+| `S` | Select Planar Surface tool (after geometry is ready) |
+| `B` | Surface Brush tool (after selecting at least one plane) |
+| `E` | Surface Eraser tool (after selecting at least one plane) |
+| `[` / `]` | Decrease / increase brush size |
+| `Ctrl/Cmd + Z` | Undo painting, surface add/remove, or priority reorder |
+| `Ctrl/Cmd + Shift + Z` or `Ctrl + Y` | Redo |
 | `F` or `0` or `Ctrl/Cmd + 0` | Fit image to screen |
 | `1` or `Ctrl/Cmd + 1` | Zoom to 100% (1 source pixel = 1 CSS pixel) |
 | `+` / `-` | Zoom in / out |
+
+### Known Limitations
+
+- Painting operates on local planar approximations; curved surfaces will depart from the fitted plane away from the planar support region.
+- Visibility and occlusion quality depend on MoGe-3 depth and normal accuracy near silhouettes.
+- Export resolution is bounded by the WebGL `MAX_TEXTURE_SIZE` and `MAX_RENDERBUFFER_SIZE` limits of the active GPU.
+- Lighting-aware shading and interactive GPU frame-rate measurements are not included yet.

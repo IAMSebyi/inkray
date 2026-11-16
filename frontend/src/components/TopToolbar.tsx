@@ -1,5 +1,6 @@
-import { Box, FolderOpen, Maximize2, Minus, Plus, X } from 'lucide-react';
+import { Box, Download, FolderOpen, Maximize2, Minus, Plus, Redo2, Undo2, X } from 'lucide-react';
 import { useEditor } from '../hooks/useEditor';
+import { PaintDocument } from '../painting/paintDocument';
 import type { ViewMode } from '../types/editor';
 import { formatZoomPercent } from '../utils/format';
 
@@ -50,6 +51,9 @@ export function TopToolbar() {
     setViewMode,
     generateGeometry,
     cancelGeometry,
+    undoPaint,
+    redoPaint,
+    exportPng,
   } = useEditor();
 
   const hasImage = state.image !== null;
@@ -58,6 +62,9 @@ export function TopToolbar() {
   const isGeneratingGeometry = state.geometry.status === 'loading';
   const isPointCloudMode = state.viewMode === 'pointcloud';
   const zoomDisabled = !hasImage || isPointCloudMode;
+  const canUndo = PaintDocument.canUndo(state.paint);
+  const canRedo = PaintDocument.canRedo(state.paint);
+  const canExport = hasImage && hasGeometry && !state.isExporting;
   const zoomLabel = !hasImage
     ? '—'
     : isPointCloudMode
@@ -119,6 +126,48 @@ export function TopToolbar() {
             </span>
           </button>
         )}
+
+        <div className="toolbar-divider" aria-hidden="true" />
+
+        <div className="segmented-control" role="group" aria-label="Paint history">
+          <button
+            type="button"
+            className="toolbar-icon-button"
+            onClick={(e) => blurAfterAction(e, undoPaint)}
+            disabled={!canUndo}
+            aria-label="Undo paint stroke"
+            title="Undo paint stroke (Ctrl/Cmd+Z)"
+          >
+            <Undo2 size={14} strokeWidth={1.75} />
+          </button>
+
+          <button
+            type="button"
+            className="toolbar-icon-button"
+            onClick={(e) => blurAfterAction(e, redoPaint)}
+            disabled={!canRedo}
+            aria-label="Redo paint stroke"
+            title="Redo paint stroke (Ctrl/Cmd+Shift+Z)"
+          >
+            <Redo2 size={14} strokeWidth={1.75} />
+          </button>
+        </div>
+
+        <button
+          type="button"
+          className="toolbar-button"
+          onClick={(e) =>
+            blurAfterAction(e, () => {
+              void exportPng();
+            })
+          }
+          disabled={!canExport}
+          aria-label="Export composited PNG"
+          title="Export composited PNG with geometry-aware paint"
+        >
+          <Download size={14} strokeWidth={1.75} />
+          <span>{state.isExporting ? 'Exporting...' : 'Export PNG'}</span>
+        </button>
       </div>
 
       <div className="toolbar-group toolbar-viewport-controls">
