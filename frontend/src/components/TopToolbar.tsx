@@ -1,6 +1,8 @@
 import {
   Box,
   Download,
+  Eye,
+  EyeOff,
   FolderOpen,
   Maximize2,
   Minus,
@@ -21,6 +23,7 @@ const VIEW_MODE_OPTIONS: Array<{ mode: ViewMode; label: string; title: string }>
   { mode: 'normals', label: 'Normals', title: 'Inferred surface normals' },
   { mode: 'mask', label: 'Mask', title: 'Valid geometry mask' },
   { mode: 'pointcloud', label: '3D', title: 'Interactive 3D point cloud' },
+  { mode: 'mesh', label: 'Mesh', title: 'Interactive 2.5D triangle mesh' },
   { mode: 'albedo', label: 'Albedo', title: 'Intrinsic surface reflectance' },
   { mode: 'shading', label: 'Shading', title: 'Diffuse shading map (preview-calibrated)' },
   { mode: 'residual', label: 'Residual', title: 'Non-diffuse appearance residual' },
@@ -67,6 +70,7 @@ export function TopToolbar() {
     cancelGeometry,
     generateAppearance,
     cancelAppearance,
+    setPaintOverlayOptions,
     undoPaint,
     redoPaint,
     exportPng,
@@ -78,7 +82,9 @@ export function TopToolbar() {
   const isGeneratingGeometry = state.geometry.status === 'loading';
   const hasAppearance = state.appearance.data !== null;
   const isGeneratingAppearance = state.appearance.status === 'loading';
-  const isPointCloudMode = state.viewMode === 'pointcloud';
+  const isPointCloudMode = state.viewMode === 'pointcloud' || state.viewMode === 'mesh';
+  const hasSurfaces = state.paint.surfaces.length > 0;
+  const isCleanPreview = state.paint.cleanPreview;
   const zoomDisabled = !hasImage || isPointCloudMode;
   const canUndo = PaintDocument.canUndo(state.paint);
   const canRedo = PaintDocument.canRedo(state.paint);
@@ -199,6 +205,25 @@ export function TopToolbar() {
             <Redo2 size={14} strokeWidth={1.75} />
           </button>
         </div>
+
+        <button
+          type="button"
+          className={`toolbar-button ${hasSurfaces && isCleanPreview ? 'is-active' : ''}`}
+          onClick={(e) =>
+            blurAfterAction(e, () => setPaintOverlayOptions({ cleanPreview: !isCleanPreview }))
+          }
+          disabled={!hasGeometry || !hasSurfaces}
+          aria-pressed={hasSurfaces && isCleanPreview}
+          aria-label="Toggle clean final preview"
+          title="Hide or show surface overlays to inspect the final painted image (P)"
+        >
+          {isCleanPreview ? (
+            <Eye size={14} strokeWidth={1.75} />
+          ) : (
+            <EyeOff size={14} strokeWidth={1.75} />
+          )}
+          <span>{isCleanPreview ? 'Show Guides' : 'Final View'}</span>
+        </button>
 
         <button
           type="button"

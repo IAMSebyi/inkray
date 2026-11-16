@@ -1070,7 +1070,8 @@ export class PlanarPaintRenderer {
     this.ensureAppearanceUploaded(appearance);
     this.ensureOwnerUploaded(geometry, doc);
 
-    const showSupport = !isExport && doc.showSupportOverlay && doc.surfaces.length > 0;
+    const hideOverlays = isExport || doc.cleanPreview;
+    const showSupport = !hideOverlays && doc.showSupportOverlay && doc.surfaces.length > 0;
     if (showSupport) {
       this.ensureSupportUploaded(doc);
     }
@@ -1127,7 +1128,7 @@ export class PlanarPaintRenderer {
       if (!surface) continue;
 
       const isActive = surface.id === doc.activeSurfaceId;
-      const showFootprint = !isExport && isActive && doc.showFootprintPreview;
+      const showFootprint = !hideOverlays && isActive && doc.showFootprintPreview;
       const { entry, hasPaint } = this.getOrSyncDecalEntry(
         surface,
         doc,

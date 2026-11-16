@@ -46,6 +46,7 @@ export interface EditorContextValue {
   setPaintOverlayOptions: (patch: {
     showSupportOverlay?: boolean;
     showFootprintPreview?: boolean;
+    cleanPreview?: boolean;
   }) => void;
   commitBrushStroke: (stroke: BrushStroke) => void;
   commitBrushStrokeBatch: (strokes: BrushStroke[]) => void;

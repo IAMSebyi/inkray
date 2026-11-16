@@ -310,7 +310,11 @@ export function EditorProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const setPaintOverlayOptions = useCallback(
-    (patch: { showSupportOverlay?: boolean; showFootprintPreview?: boolean }) => {
+    (patch: {
+      showSupportOverlay?: boolean;
+      showFootprintPreview?: boolean;
+      cleanPreview?: boolean;
+    }) => {
       dispatch({ type: 'PAINT_SET_OVERLAY_OPTIONS', patch });
     },
     [],

@@ -76,7 +76,11 @@ export type EditorAction =
   | { type: 'PAINT_SET_TEXTURE_PRESERVATION'; value: number }
   | {
       type: 'PAINT_SET_OVERLAY_OPTIONS';
-      patch: { showSupportOverlay?: boolean; showFootprintPreview?: boolean };
+      patch: {
+        showSupportOverlay?: boolean;
+        showFootprintPreview?: boolean;
+        cleanPreview?: boolean;
+      };
     }
   | { type: 'PAINT_COMMIT_STROKE'; stroke: BrushStroke }
   | { type: 'PAINT_COMMIT_STROKES'; strokes: BrushStroke[] }
@@ -279,7 +283,8 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
       const nextViewMode =
         action.tool === 'brush' ||
         action.tool === 'eraser' ||
-        (action.tool === 'select-surface' && state.viewMode === 'pointcloud')
+        (action.tool === 'select-surface' &&
+          (state.viewMode === 'pointcloud' || state.viewMode === 'mesh'))
           ? 'rgb'
           : state.viewMode;
       return {
@@ -451,7 +456,8 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
       }
       return {
         ...state,
-        viewMode: state.viewMode === 'pointcloud' ? 'rgb' : state.viewMode,
+        viewMode:
+          state.viewMode === 'pointcloud' || state.viewMode === 'mesh' ? 'rgb' : state.viewMode,
         paint: PaintDocument.selectSurface(state.paint, action.selection),
       };
 

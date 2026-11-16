@@ -6,7 +6,8 @@ export function LeftToolbar() {
   const { state, setActiveTool } = useEditor();
 
   const hasGeometry = state.geometry.status === 'ready' && state.geometry.data !== null;
-  const isPointCloud = state.viewMode === 'pointcloud' && state.geometry.data !== null;
+  const isPointCloud =
+    (state.viewMode === 'pointcloud' || state.viewMode === 'mesh') && state.geometry.data !== null;
   const hasSurfaces = state.paint.surfaces.length > 0;
   const canSelectSurface = hasGeometry && !isPointCloud;
   const canPaint = canSelectSurface && hasSurfaces;

@@ -13,19 +13,33 @@ import {
 
 interface PointCloudViewerProps {
   geometry: GeometryData;
+  mode?: ViewMode3D;
+  onModeChange?: (mode: ViewMode3D) => void;
 }
 
 type DensityMode = 'auto' | 'full';
 type ViewMode3D = 'points' | 'mesh';
 
-export function PointCloudViewer({ geometry }: PointCloudViewerProps) {
+export function PointCloudViewer({
+  geometry,
+  mode = 'points',
+  onModeChange,
+}: PointCloudViewerProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
   const materialRef = useRef<THREE.PointsMaterial | null>(null);
 
   const [densityMode, setDensityMode] = useState<DensityMode>('auto');
-  const [viewMode3d, setViewMode3d] = useState<ViewMode3D>('points');
+  const [internalMode, setInternalMode] = useState<ViewMode3D>(mode);
+  const viewMode3d = onModeChange ? mode : internalMode;
+  const setViewMode3d = (next: ViewMode3D) => {
+    if (onModeChange) {
+      onModeChange(next);
+    } else {
+      setInternalMode(next);
+    }
+  };
   const [pointSize, setPointSize] = useState<number>(2);
   const pointSizeRef = useRef(pointSize);
   pointSizeRef.current = pointSize;

@@ -60,6 +60,7 @@ export function EditorViewport({
     paintRendererRef,
     setViewportSize,
     setTransform,
+    setViewMode,
     selectSurfaceAtImagePoint,
     commitBrushStrokeBatch,
   } = useEditor();
@@ -135,7 +136,7 @@ export function EditorViewport({
       paint,
       isPanning: currentIsPanning,
     } = latestRenderStateRef.current;
-    if (viewMode === 'pointcloud') {
+    if (viewMode === 'pointcloud' || viewMode === 'mesh') {
       return;
     }
 
@@ -227,7 +228,7 @@ export function EditorViewport({
     if (state.transform !== lastDispatchedTransformRef.current) {
       liveTransformRef.current = state.transform;
     }
-    if (state.viewMode === 'pointcloud') {
+    if (state.viewMode === 'pointcloud' || state.viewMode === 'mesh') {
       cursorStore.setSample(null);
       return;
     }
@@ -269,7 +270,7 @@ export function EditorViewport({
 
     const handleWheel = (event: WheelEvent) => {
       const { image, viewportSize, viewMode } = latestRenderStateRef.current;
-      if (viewMode === 'pointcloud') {
+      if (viewMode === 'pointcloud' || viewMode === 'mesh') {
         return;
       }
 
@@ -381,7 +382,12 @@ export function EditorViewport({
       return;
     }
 
-    if (event.button !== 0 || state.viewMode === 'pointcloud' || !state.geometry.data) {
+    if (
+      event.button !== 0 ||
+      state.viewMode === 'pointcloud' ||
+      state.viewMode === 'mesh' ||
+      !state.geometry.data
+    ) {
       return;
     }
 
@@ -636,7 +642,8 @@ export function EditorViewport({
     }
   };
 
-  const isPointCloudMode = state.viewMode === 'pointcloud' && state.geometry.data !== null;
+  const isPointCloudMode =
+    (state.viewMode === 'pointcloud' || state.viewMode === 'mesh') && state.geometry.data !== null;
   const isPaintWebGlVisible =
     !isPointCloudMode &&
     state.viewMode === 'rgb' &&
@@ -684,7 +691,12 @@ export function EditorViewport({
       />
 
       {isPointCloudMode && state.geometry.data && (
-        <PointCloudViewer key={state.geometry.data.metadata.id} geometry={state.geometry.data} />
+        <PointCloudViewer
+          key={state.geometry.data.metadata.id}
+          geometry={state.geometry.data}
+          mode={state.viewMode === 'mesh' ? 'mesh' : 'points'}
+          onModeChange={(nextMode) => setViewMode(nextMode === 'mesh' ? 'mesh' : 'pointcloud')}
+        />
       )}
 
       {!state.image && !state.isLoading && <EmptyViewportState />}

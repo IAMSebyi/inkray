@@ -28,6 +28,7 @@ export interface PaintDocumentState {
   selectionError: string | null;
   showSupportOverlay: boolean;
   showFootprintPreview: boolean;
+  cleanPreview: boolean;
   paintMode: PaintMode;
   texturePreservation: number;
   brushConfig: BrushUiConfig;
@@ -75,6 +76,7 @@ export const PaintDocument = {
       selectionError: null,
       showSupportOverlay: true,
       showFootprintPreview: true,
+      cleanPreview: false,
       paintMode: previousMode ?? 'shading',
       texturePreservation:
         previousTexturePreservation !== undefined
@@ -237,12 +239,13 @@ export const PaintDocument = {
 
   setOverlayOptions(
     doc: PaintDocumentState,
-    patch: { showSupportOverlay?: boolean; showFootprintPreview?: boolean },
+    patch: { showSupportOverlay?: boolean; showFootprintPreview?: boolean; cleanPreview?: boolean },
   ): PaintDocumentState {
     return {
       ...doc,
       showSupportOverlay: patch.showSupportOverlay ?? doc.showSupportOverlay,
       showFootprintPreview: patch.showFootprintPreview ?? doc.showFootprintPreview,
+      cleanPreview: patch.cleanPreview ?? doc.cleanPreview,
     };
   },
 

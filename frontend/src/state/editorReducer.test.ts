@@ -344,6 +344,19 @@ describe('editorReducer', () => {
     expect(state.viewMode).toBe('shading');
     state = editorReducer(state, { type: 'SET_VIEW_MODE', mode: 'residual' });
     expect(state.viewMode).toBe('residual');
+    state = editorReducer(state, { type: 'SET_VIEW_MODE', mode: 'mesh' });
+    expect(state.viewMode).toBe('mesh');
+    state = editorReducer(state, { type: 'SET_VIEW_MODE', mode: 'rgb' });
+    expect(state.viewMode).toBe('rgb');
+
+    // Clean preview toggle hides overlays cleanly without erasing checkbox preferences.
+    state = editorReducer(state, {
+      type: 'PAINT_SET_OVERLAY_OPTIONS',
+      patch: { cleanPreview: true },
+    });
+    expect(state.paint.cleanPreview).toBe(true);
+    expect(state.paint.showSupportOverlay).toBe(true);
+    expect(state.paint.showFootprintPreview).toBe(true);
 
     // Switching compositing modes & texture strength works independently of stroke undo history.
     state = editorReducer(state, { type: 'PAINT_SET_MODE', mode: 'texture' });

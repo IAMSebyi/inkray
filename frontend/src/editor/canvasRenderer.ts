@@ -147,7 +147,7 @@ export interface CanvasRenderParams {
   dpr: number;
   image: LoadedImage | null;
   transform: ViewportTransform;
-  viewMode?: Exclude<ViewMode, 'pointcloud'>;
+  viewMode?: Exclude<ViewMode, 'pointcloud' | 'mesh'>;
   geometry?: GeometryData | null;
   appearance?: AppearanceData | null;
   borderOnly?: boolean;

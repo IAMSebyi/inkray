@@ -59,7 +59,8 @@ export function StatusBar() {
   const { state } = useEditor();
   const metadata = state.image?.metadata ?? null;
   const hasImage = metadata !== null;
-  const isPointCloud = state.viewMode === 'pointcloud' && state.geometry.data !== null;
+  const isPointCloud =
+    (state.viewMode === 'pointcloud' || state.viewMode === 'mesh') && state.geometry.data !== null;
 
   return (
     <footer className="status-bar" aria-label="Editor status">

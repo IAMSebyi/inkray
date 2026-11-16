@@ -608,6 +608,15 @@ export function RightSidebar() {
                     <label className="inspector-checkbox-row">
                       <input
                         type="checkbox"
+                        checked={state.paint.cleanPreview}
+                        onChange={(e) => setPaintOverlayOptions({ cleanPreview: e.target.checked })}
+                      />
+                      <span>Clean final view (hide overlays)</span>
+                    </label>
+
+                    <label className="inspector-checkbox-row">
+                      <input
+                        type="checkbox"
                         checked={state.paint.showSupportOverlay}
                         onChange={(e) =>
                           setPaintOverlayOptions({ showSupportOverlay: e.target.checked })

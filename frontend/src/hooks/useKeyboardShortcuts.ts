@@ -34,17 +34,24 @@ export function useKeyboardShortcuts(): { isSpacePressed: boolean } {
     zoomOut,
     setActiveTool,
     setBrushConfig,
+    setPaintOverlayOptions,
     undoPaint,
     redoPaint,
   } = useEditor();
   const [isSpacePressed, setIsSpacePressed] = useState(false);
 
   const hasImage = state.image !== null;
+  const hasSurfaces = state.paint.surfaces.length > 0;
   const brushSizeRef = useRef(state.paint.brushConfig.sizeMultiplier);
+  const cleanPreviewRef = useRef(state.paint.cleanPreview);
 
   useEffect(() => {
     brushSizeRef.current = state.paint.brushConfig.sizeMultiplier;
   }, [state.paint.brushConfig.sizeMultiplier]);
+
+  useEffect(() => {
+    cleanPreviewRef.current = state.paint.cleanPreview;
+  }, [state.paint.cleanPreview]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -111,6 +118,10 @@ export function useKeyboardShortcuts(): { isSpacePressed: boolean } {
         }
         if (lower === 'e') {
           setActiveTool('eraser');
+          return;
+        }
+        if (lower === 'p' && hasSurfaces) {
+          setPaintOverlayOptions({ cleanPreview: !cleanPreviewRef.current });
           return;
         }
         if (event.key === '[') {
@@ -184,6 +195,7 @@ export function useKeyboardShortcuts(): { isSpacePressed: boolean } {
     };
   }, [
     hasImage,
+    hasSurfaces,
     openFilePicker,
     fitToScreen,
     zoomToActualSize,
@@ -191,6 +203,7 @@ export function useKeyboardShortcuts(): { isSpacePressed: boolean } {
     zoomOut,
     setActiveTool,
     setBrushConfig,
+    setPaintOverlayOptions,
     undoPaint,
     redoPaint,
   ]);

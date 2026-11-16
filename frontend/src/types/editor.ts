@@ -59,7 +59,7 @@ export type EditorTool = 'pointer' | 'hand' | 'select-surface' | 'brush' | 'eras
 export type ZoomMode = 'fit' | 'custom';
 
 export type ViewMode =
-  'rgb' | 'depth' | 'normals' | 'mask' | 'pointcloud' | 'albedo' | 'shading' | 'residual';
+  'rgb' | 'depth' | 'normals' | 'mask' | 'pointcloud' | 'mesh' | 'albedo' | 'shading' | 'residual';
 
 export type GeometryStatus = 'idle' | 'loading' | 'ready' | 'error';
 
