@@ -23,6 +23,7 @@ def create_app(
         fastapi_app.state.settings = cfg
         fastapi_app.state.geometry_cache = GeometryCache(cfg.cache_dir)
         fastapi_app.state.inference_lock = threading.Lock()
+        fastapi_app.state.last_loaded_geometry = None
 
         if inference_model is not None:
             fastapi_app.state.inference_model = inference_model

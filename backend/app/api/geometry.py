@@ -1,12 +1,17 @@
+import base64
 from dataclasses import asdict
+import math
 import threading
 from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFile
+import numpy as np
 from PIL import UnidentifiedImageError
+from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 import torch
 
 from ..cache.geometry_cache import (
     GeometryCache,
+    GeometryRecordMetadata,
     InferenceParams,
     VALID_MAP_KINDS,
     build_cache_key,
@@ -14,9 +19,16 @@ from ..cache.geometry_cache import (
     compute_image_sha256,
 )
 from ..config import Settings
+from ..geometry.result import GeometryResult
+from ..geometry.surface_selector import SurfaceSelectionOutcome, SurfaceSelector
 from ..utils.image import decode_image_bytes
 
 router = APIRouter(prefix="/api/geometry", tags=["geometry"])
+
+
+class SelectSurfaceRequest(BaseModel):
+    image_x: float
+    image_y: float
 
 
 def _inference_params(settings: Settings) -> InferenceParams:
@@ -138,3 +150,93 @@ def get_geometry_map(request: Request, geometry_id: str, kind: str) -> Response:
             "Cache-Control": "public, max-age=31536000, immutable",
         },
     )
+
+
+def _load_geometry_record(
+    request: Request,
+    geometry_id: str,
+) -> tuple[GeometryRecordMetadata, GeometryResult] | None:
+    cached = getattr(request.app.state, "last_loaded_geometry", None)
+    if cached is not None and cached[0] == geometry_id:
+        return (cached[1], cached[2])
+
+    cache: GeometryCache = request.app.state.geometry_cache
+    metadata = cache.get_metadata(geometry_id)
+    if metadata is None:
+        return None
+    result = cache.load_result(geometry_id)
+    if result is None:
+        return None
+
+    request.app.state.last_loaded_geometry = (geometry_id, metadata, result)
+    return (metadata, result)
+
+
+def _serialize_surface_outcome(outcome: SurfaceSelectionOutcome) -> dict[str, object]:
+    if not outcome.ok or outcome.selection is None:
+        return {
+            "ok": False,
+            "reason": outcome.reason or "Failed to select planar surface.",
+        }
+
+    sel = outcome.selection
+    mask_b64 = base64.b64encode(sel.support_mask.astype(np.uint8).tobytes()).decode("ascii")
+    return {
+        "ok": True,
+        "selection": {
+            "seed_image_point": {
+                "x": float(sel.seed_image_point[0]),
+                "y": float(sel.seed_image_point[1]),
+            },
+            "seed_inference_pixel": {
+                "x": int(sel.seed_inference_pixel[0]),
+                "y": int(sel.seed_inference_pixel[1]),
+            },
+            "seed_point_3d": [float(v) for v in sel.seed_point_3d],
+            "plane": {
+                "origin": [float(v) for v in sel.plane.origin],
+                "normal": [float(v) for v in sel.plane.normal],
+            },
+            "frame": {
+                "origin": [float(v) for v in sel.frame.origin],
+                "normal": [float(v) for v in sel.frame.normal],
+                "u_axis": [float(v) for v in sel.frame.u_axis],
+                "v_axis": [float(v) for v in sel.frame.v_axis],
+            },
+            "support_mask_b64": mask_b64,
+            "support_width": int(sel.support_mask.shape[1]),
+            "support_height": int(sel.support_mask.shape[0]),
+            "inlier_count": sel.inlier_count,
+            "rms_error": float(sel.rms_error),
+            "suggested_footprint": {
+                "min_u": float(sel.suggested_footprint.min_u),
+                "max_u": float(sel.suggested_footprint.max_u),
+                "min_v": float(sel.suggested_footprint.min_v),
+                "max_v": float(sel.suggested_footprint.max_v),
+            },
+            "reference_brush_diameter": float(sel.reference_brush_diameter),
+        },
+    }
+
+
+@router.post("/{geometry_id}/surface/select")
+async def select_planar_surface(
+    request: Request,
+    geometry_id: str,
+    body: SelectSurfaceRequest,
+) -> dict[str, object]:
+    if not (math.isfinite(body.image_x) and math.isfinite(body.image_y)):
+        raise HTTPException(status_code=400, detail="Surface click coordinates must be finite.")
+
+    record = await run_in_threadpool(_load_geometry_record, request, geometry_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Geometry record not found.")
+
+    metadata, result = record
+    outcome = await run_in_threadpool(
+        SurfaceSelector.select_at_image_point,
+        result,
+        (body.image_x, body.image_y),
+        (metadata.original_width, metadata.original_height),
+    )
+    return _serialize_surface_outcome(outcome)

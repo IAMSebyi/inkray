@@ -7,10 +7,11 @@ Python + FastAPI inference service for Inkray, providing monocular geometry esti
 - **MoGe-3 Inference:** Loads `moge.model.v3.MoGeModel` once at server startup on CUDA when available (or CPU fallback), decodes JPEG/PNG uploads with EXIF orientation applied, and bounds input size while preserving aspect ratio.
 - **Typed Geometry Representation:** Wraps `DepthMap`, `NormalMap`, `Points3D`, `CameraIntrinsics`, and `ValidMask` inside `GeometryResult` using OpenCV camera conventions (`+X` right, `+Y` down, `+Z` forward, normalized `[0, 1]` intrinsics) alongside conversion helpers to Three.js world space (`+Y` up, `-Z` forward).
 - **Content-Addressed Disk Cache:** Keys inferred geometry by SHA-256 of the uploaded image bytes, model ID, inference parameters, and cache schema version. Stores arrays compressed in `geometry.npz` and JSON metadata in `meta.json` under `backend/.cache/geometry` by default (kept separate from Hugging Face weight downloads in `~/.cache/huggingface`).
-- **Binary API Endpoints:**
+- **Binary & Geometry Selection API Endpoints:**
   - `POST /api/geometry/infer` accepts multipart `file` uploads, returns `GeometryRecordMetadata` JSON, and checks for client disconnect before writing incomplete cache records.
   - `GET /api/geometry/{geometry_id}` returns cached metadata.
   - `GET /api/geometry/{geometry_id}/maps/{kind}` serves `depth` (`float32`), `points` (`float32`), `normals` (`float32`), and `mask` (`uint8`) as `application/octet-stream` with `X-Array-Shape` and `X-Array-Dtype` headers.
+  - `POST /api/geometry/{geometry_id}/surface/select` fits a local planar surface with NumPy RANSAC/PCA refinement and adaptive SciPy connected-component region growing around a clicked pixel in a single request.
 
 ## Setup
 

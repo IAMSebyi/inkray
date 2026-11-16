@@ -1,3 +1,4 @@
+import base64
 from io import BytesIO
 from pathlib import Path
 from fastapi.testclient import TestClient
@@ -24,8 +25,10 @@ class StubGeometryModel(InferenceModel[np.ndarray, GeometryResult]):
         h, w = input_data.shape[:2]
         depth = np.full((h, w), 2.5, dtype=np.float32)
         normals = np.tile(np.array([0.0, 0.0, -1.0], dtype=np.float32), (h, w, 1))
-        points = np.zeros((h, w, 3), dtype=np.float32)
-        points[..., 2] = 2.5
+        xs = ((np.arange(w, dtype=np.float32) + 0.5) / w - 0.5) / 0.9
+        ys = ((np.arange(h, dtype=np.float32) + 0.5) / h - 0.5) / 0.9
+        gx, gy = np.meshgrid(xs, ys)
+        points = np.stack([gx * 2.5, gy * 2.5, depth], axis=-1).astype(np.float32)
         intrinsics = np.array([[0.9, 0.0, 0.5], [0.0, 0.9, 0.5], [0.0, 0.0, 1.0]], dtype=np.float32)
         mask = np.ones((h, w), dtype=bool)
         mask[0, 0] = False
@@ -96,6 +99,32 @@ def test_infer_caches_result_and_serves_binary_maps(tmp_path: Path) -> None:
         assert mask_arr[0, 0] == 0
         assert mask_arr[1, 1] == 1
 
+        # Surface selection succeeds in a single request on valid planar pixels.
+        sel_resp = client.post(
+            f"/api/geometry/{geometry_id}/surface/select",
+            json={"image_x": 8.0, "image_y": 6.0},
+        )
+        assert sel_resp.status_code == 200
+        sel_body = sel_resp.json()
+        assert sel_body["ok"] is True
+        selection = sel_body["selection"]
+        assert selection["inlier_count"] == 47
+        assert selection["support_width"] == 8
+        assert selection["support_height"] == 6
+        decoded_mask = np.frombuffer(
+            base64.b64decode(selection["support_mask_b64"]), dtype=np.uint8
+        ).reshape(6, 8)
+        assert decoded_mask[0, 0] == 0
+        assert int(np.count_nonzero(decoded_mask)) == 47
+
+        # Clicking the invalid pixel at top-left returns a clean failure outcome.
+        invalid_sel = client.post(
+            f"/api/geometry/{geometry_id}/surface/select",
+            json={"image_x": 0.5, "image_y": 0.5},
+        )
+        assert invalid_sel.status_code == 200
+        assert invalid_sel.json()["ok"] is False
+
 
 def test_invalid_upload_and_missing_records(tmp_path: Path) -> None:
     model = StubGeometryModel()
@@ -115,6 +144,12 @@ def test_invalid_upload_and_missing_records(tmp_path: Path) -> None:
 
         missing_map = client.get("/api/geometry/deadbeef/maps/depth")
         assert missing_map.status_code == 404
+
+        missing_sel = client.post(
+            "/api/geometry/deadbeef/surface/select",
+            json={"image_x": 10.0, "image_y": 10.0},
+        )
+        assert missing_sel.status_code == 404
 
         bad_kind = client.get("/api/geometry/deadbeef/maps/albedo")
         assert bad_kind.status_code == 400
