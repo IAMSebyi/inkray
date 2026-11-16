@@ -1,9 +1,7 @@
 from dataclasses import asdict, dataclass
 import hashlib
 import json
-import os
 from pathlib import Path
-import tempfile
 from typing import Literal
 import numpy as np
 
@@ -13,6 +11,7 @@ from ..geometry.mask import ValidMask
 from ..geometry.normals import NormalMap
 from ..geometry.points import Points3D
 from ..geometry.result import GeometryResult
+from .storage import is_valid_cache_id, write_npz_and_json
 
 CACHE_FORMAT_VERSION = 1
 MapKind = Literal["depth", "normals", "points", "mask"]
@@ -116,9 +115,6 @@ class GeometryCache:
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-    def _is_valid_id(self, cache_id: str) -> bool:
-        return bool(cache_id) and all(c in "0123456789abcdef" for c in cache_id)
-
     def _meta_path(self, cache_id: str) -> Path:
         return self.cache_dir / f"{cache_id}.json"
 
@@ -126,7 +122,7 @@ class GeometryCache:
         return self.cache_dir / f"{cache_id}.npz"
 
     def has(self, cache_id: str) -> bool:
-        if not self._is_valid_id(cache_id):
+        if not is_valid_cache_id(cache_id):
             return False
         meta_path = self._meta_path(cache_id)
         npz_path = self._npz_path(cache_id)
@@ -136,7 +132,7 @@ class GeometryCache:
         return meta is not None and meta.cache_version == CACHE_FORMAT_VERSION
 
     def get_metadata(self, cache_id: str) -> GeometryRecordMetadata | None:
-        if not self._is_valid_id(cache_id):
+        if not is_valid_cache_id(cache_id):
             return None
         meta_path = self._meta_path(cache_id)
         if not meta_path.is_file():
@@ -152,7 +148,6 @@ class GeometryCache:
         metadata: GeometryRecordMetadata,
         result: GeometryResult,
     ) -> None:
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
         npz_path = self._npz_path(cache_id)
         meta_path = self._meta_path(cache_id)
 
@@ -165,27 +160,14 @@ class GeometryCache:
         if result.normals is not None:
             payload["normals"] = np.ascontiguousarray(result.normals.data, dtype=np.float32)
 
-        fd_npz, tmp_npz = tempfile.mkstemp(dir=self.cache_dir, prefix=f".{cache_id}_", suffix=".npz")
-        try:
-            with os.fdopen(fd_npz, "wb") as f:
-                np.savez_compressed(f, **payload)
-            os.replace(tmp_npz, npz_path)
-        except Exception:
-            if os.path.exists(tmp_npz):
-                os.unlink(tmp_npz)
-            raise
-
-        fd_meta, tmp_meta = tempfile.mkstemp(
-            dir=self.cache_dir, prefix=f".{cache_id}_", suffix=".json"
+        write_npz_and_json(
+            cache_dir=self.cache_dir,
+            cache_id=cache_id,
+            payload=payload,
+            metadata_dict=asdict(metadata),
+            npz_path=npz_path,
+            meta_path=meta_path,
         )
-        try:
-            with os.fdopen(fd_meta, "w", encoding="utf-8") as f:
-                json.dump(asdict(metadata), f, separators=(",", ":"))
-            os.replace(tmp_meta, meta_path)
-        except Exception:
-            if os.path.exists(tmp_meta):
-                os.unlink(tmp_meta)
-            raise
 
     def load_result(self, cache_id: str) -> GeometryResult | None:
         if not self.has(cache_id):

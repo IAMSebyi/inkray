@@ -7,7 +7,6 @@ import numpy as np
 from PIL import UnidentifiedImageError
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
-import torch
 
 from ..cache.geometry_cache import (
     GeometryCache,
@@ -21,6 +20,7 @@ from ..cache.geometry_cache import (
 from ..config import Settings
 from ..geometry.result import GeometryResult
 from ..geometry.surface_selector import SurfaceSelectionOutcome, SurfaceSelector
+from ..inference.memory import is_cuda_oom, prepare_model_for_inference
 from ..utils.image import decode_image_bytes
 
 router = APIRouter(prefix="/api/geometry", tags=["geometry"])
@@ -41,14 +41,10 @@ def _inference_params(settings: Settings) -> InferenceParams:
     )
 
 
-def _is_cuda_oom(exc: BaseException) -> bool:
-    if isinstance(exc, torch.OutOfMemoryError):
-        return True
-    return isinstance(exc, RuntimeError) and "out of memory" in str(exc).lower()
-
-
 def _infer_and_cache(
     model: object,
+    peer_model: object | None,
+    offload_inactive: bool,
     cache: GeometryCache,
     lock: threading.Lock,
     cache_id: str,
@@ -63,6 +59,11 @@ def _infer_and_cache(
         if existing is not None:
             return (asdict(existing), True)
 
+        prepare_model_for_inference(
+            active_model=model,
+            peer_models=(peer_model,),
+            offload_inactive=offload_inactive,
+        )
         result = model.run(decoded.rgb)  # type: ignore[attr-defined]
         metadata = build_metadata(
             cache_id=cache_id,
@@ -84,6 +85,7 @@ async def infer_geometry(request: Request, file: UploadFile = File(...)) -> dict
     settings: Settings = request.app.state.settings
     cache: GeometryCache = request.app.state.geometry_cache
     model = request.app.state.inference_model
+    peer_model = getattr(request.app.state, "appearance_model", None)
     lock: threading.Lock = request.app.state.inference_lock
 
     params = _inference_params(settings)
@@ -98,6 +100,8 @@ async def infer_geometry(request: Request, file: UploadFile = File(...)) -> dict
         metadata_dict, was_cached = await run_in_threadpool(
             _infer_and_cache,
             model,
+            peer_model,
+            settings.offload_inactive_models,
             cache,
             lock,
             cache_id,
@@ -108,7 +112,7 @@ async def infer_geometry(request: Request, file: UploadFile = File(...)) -> dict
     except (ValueError, UnidentifiedImageError, OSError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        if _is_cuda_oom(exc):
+        if is_cuda_oom(exc):
             raise HTTPException(
                 status_code=503,
                 detail="GPU out of memory during geometry inference. Try a smaller max image size.",
