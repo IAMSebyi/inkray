@@ -236,6 +236,206 @@ export function sceneToGeometryData(scene: SyntheticScene, imageId = 'stub-img')
   };
 }
 
+export interface CylinderSceneOptions {
+  width: number;
+  height: number;
+  intrinsics?: number[][];
+  axisCenter: Vec3Tuple;
+  radius: number;
+  occluders?: DepthOverrideRegion[];
+  backgrounds?: DepthOverrideRegion[];
+  invalidRegions?: InvalidRegion[];
+  noiseAmplitude?: number;
+}
+
+export interface SphereSceneOptions {
+  width: number;
+  height: number;
+  intrinsics?: number[][];
+  center: Vec3Tuple;
+  radius: number;
+  occluders?: DepthOverrideRegion[];
+  backgrounds?: DepthOverrideRegion[];
+  invalidRegions?: InvalidRegion[];
+  noiseAmplitude?: number;
+}
+
+function buildRaycastScene(params: {
+  width: number;
+  height: number;
+  intrinsics?: number[][];
+  occluders?: DepthOverrideRegion[];
+  backgrounds?: DepthOverrideRegion[];
+  invalidRegions?: InvalidRegion[];
+  noiseAmplitude?: number;
+  traceRay: (rayDir: Vec3Tuple) => { t: number; normal: Vec3Tuple } | null;
+  referenceOrigin: Vec3Tuple;
+  referenceNormal: Vec3Tuple;
+}): SyntheticScene {
+  const { width, height } = params;
+  const rawIntrinsics = params.intrinsics ?? makeSyntheticIntrinsics();
+  const intr = parseNormalizedIntrinsics(rawIntrinsics);
+
+  const total = width * height;
+  const depth = new Float32Array(total);
+  const points = new Float32Array(total * 3);
+  const mask = new Uint8Array(total);
+  const normals = new Float32Array(total * 3);
+  const colors = new Uint8ClampedArray(total * 4);
+  const truthPlaneMask = new Uint8Array(total);
+
+  const occluders = params.occluders ?? [];
+  const backgrounds = params.backgrounds ?? [];
+  const invalidRegions = params.invalidRegions ?? [];
+  const noiseAmplitude = params.noiseAmplitude ?? 0;
+
+  for (let row = 0; row < height; row++) {
+    const vImg = (row + 0.5) / height;
+    for (let col = 0; col < width; col++) {
+      const idx = row * width + col;
+      const pBase = idx * 3;
+      const cBase = idx * 4;
+
+      colors[cBase] = Math.round((col / Math.max(1, width - 1)) * 200) + 30;
+      colors[cBase + 1] = Math.round((row / Math.max(1, height - 1)) * 180) + 40;
+      colors[cBase + 2] = 140;
+      colors[cBase + 3] = 255;
+
+      const invalidMatch = invalidRegions.find((r) => insideRect(col, row, r));
+      if (invalidMatch) {
+        mask[idx] = 0;
+        depth[idx] = invalidMatch.depthValue ?? Number.NaN;
+        normals[pBase + 2] = -1;
+        truthPlaneMask[idx] = 0;
+        continue;
+      }
+
+      const rayDir = normalizedUvToRayOpenCV({ x: (col + 0.5) / width, y: vImg }, intr, false);
+      const trace = params.traceRay(rayDir);
+      let chosenDepth = trace ? trace.t : -1;
+      let chosenNormal: Vec3Tuple = trace ? trace.normal : [0, 0, -1];
+      let isTargetSurface = trace !== null && trace.t > 0;
+
+      for (let i = 0; i < occluders.length; i++) {
+        const occ = occluders[i];
+        if (occ && insideRect(col, row, occ) && occ.depth > 0) {
+          if (!isTargetSurface || occ.depth < chosenDepth) {
+            chosenDepth = occ.depth;
+            chosenNormal = vecNormalize(occ.normal ?? [0, 0, -1]) ?? [0, 0, -1];
+            isTargetSurface = false;
+          }
+        }
+      }
+
+      if (isTargetSurface) {
+        for (let i = 0; i < backgrounds.length; i++) {
+          const bg = backgrounds[i];
+          if (bg && insideRect(col, row, bg) && bg.depth > 0) {
+            chosenDepth = bg.depth;
+            chosenNormal = vecNormalize(bg.normal ?? [0, 0, -1]) ?? [0, 0, -1];
+            isTargetSurface = false;
+          }
+        }
+      }
+
+      if (chosenDepth <= 0 || !Number.isFinite(chosenDepth)) {
+        mask[idx] = 0;
+        depth[idx] = 0;
+        truthPlaneMask[idx] = 0;
+        continue;
+      }
+
+      const jitter = noiseAmplitude > 0 ? 1 + noiseAmplitude * pixelHashNoise(idx) : 1;
+      const noisyDepth = Math.max(1e-3, chosenDepth * jitter);
+
+      mask[idx] = 1;
+      depth[idx] = noisyDepth;
+      points[pBase] = rayDir[0] * noisyDepth;
+      points[pBase + 1] = rayDir[1] * noisyDepth;
+      points[pBase + 2] = noisyDepth;
+      normals[pBase] = chosenNormal[0];
+      normals[pBase + 1] = chosenNormal[1];
+      normals[pBase + 2] = chosenNormal[2];
+      truthPlaneMask[idx] = isTargetSurface ? 1 : 0;
+    }
+  }
+
+  return {
+    geometry: {
+      metadata: {
+        inference_width: width,
+        inference_height: height,
+        intrinsics: rawIntrinsics,
+      },
+      depth,
+      points,
+      mask,
+      normals,
+    },
+    colors,
+    truthPlaneMask,
+    planeOrigin: params.referenceOrigin,
+    planeNormal: params.referenceNormal,
+  };
+}
+
+export function createSyntheticCylinderScene(options: CylinderSceneOptions): SyntheticScene {
+  const [cx, , cz] = options.axisCenter;
+  const rSq = options.radius * options.radius;
+  return buildRaycastScene({
+    width: options.width,
+    height: options.height,
+    intrinsics: options.intrinsics,
+    occluders: options.occluders,
+    backgrounds: options.backgrounds,
+    invalidRegions: options.invalidRegions,
+    noiseAmplitude: options.noiseAmplitude,
+    referenceOrigin: [cx, 0, cz - options.radius],
+    referenceNormal: [0, 0, -1],
+    traceRay: (rayDir) => {
+      const a = rayDir[0] * rayDir[0] + rayDir[2] * rayDir[2];
+      if (a <= 1e-8) return null;
+      const b = -2 * (rayDir[0] * cx + rayDir[2] * cz);
+      const c = cx * cx + cz * cz - rSq;
+      const disc = b * b - 4 * a * c;
+      if (disc < 0) return null;
+      const t = (-b - Math.sqrt(disc)) / (2 * a);
+      if (t <= 0) return null;
+      const px = rayDir[0] * t;
+      const pz = rayDir[2] * t;
+      const normal = vecNormalize([px - cx, 0, pz - cz]);
+      return normal ? { t, normal } : null;
+    },
+  });
+}
+
+export function createSyntheticSphereScene(options: SphereSceneOptions): SyntheticScene {
+  const [sx, sy, sz] = options.center;
+  const rSq = options.radius * options.radius;
+  return buildRaycastScene({
+    width: options.width,
+    height: options.height,
+    intrinsics: options.intrinsics,
+    occluders: options.occluders,
+    backgrounds: options.backgrounds,
+    invalidRegions: options.invalidRegions,
+    noiseAmplitude: options.noiseAmplitude,
+    referenceOrigin: [sx, sy, sz - options.radius],
+    referenceNormal: [0, 0, -1],
+    traceRay: (rayDir) => {
+      const a = vecDot(rayDir, rayDir);
+      const b = -2 * (rayDir[0] * sx + rayDir[1] * sy + rayDir[2] * sz);
+      const c = sx * sx + sy * sy + sz * sz - rSq;
+      const disc = b * b - 4 * a * c;
+      if (disc < 0) return null;
+      const t = (-b - Math.sqrt(disc)) / (2 * a);
+      if (t <= 0) return null;
+      const normal = vecNormalize([rayDir[0] * t - sx, rayDir[1] * t - sy, rayDir[2] * t - sz]);
+      return normal ? { t, normal } : null;
+    },
+  });
+}
+
 export function buildSyntheticSurfaceSelection(
   scene: SyntheticScene,
   seedCol: number,
