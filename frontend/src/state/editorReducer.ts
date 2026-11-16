@@ -7,8 +7,13 @@ import {
   reconcileTransformOnResize,
   zoomAtPoint,
 } from '../editor/viewportTransforms';
+import type { AutoAnchorMode } from '../geometry/autoSurfaceAnchor';
 import type { SurfaceSelectionResult } from '../geometry/planeFrame';
+import { type Artwork, ArtworkModel } from '../painting/artwork';
+import type { ArtworkPlacement } from '../painting/artworkPlacement';
 import type { BrushStroke } from '../painting/brushEngine';
+import type { ImageSpaceStroke } from '../painting/imageSpacePaint';
+import type { PlanarDecalSurface } from '../painting/planarDecal';
 import {
   type BrushUiConfig,
   PaintDocument,
@@ -26,6 +31,7 @@ import type {
   Size2D,
   ViewMode,
   ViewportTransform,
+  WorkspaceMode,
   ZoomMode,
 } from '../types/editor';
 
@@ -37,6 +43,7 @@ export interface EditorState {
   transform: ViewportTransform;
   zoomMode: ZoomMode;
   viewportSize: Size2D;
+  workspaceMode: WorkspaceMode;
   activeTool: EditorTool;
   viewMode: ViewMode;
   geometry: GeometryState;
@@ -84,10 +91,30 @@ export type EditorAction =
     }
   | { type: 'PAINT_COMMIT_STROKE'; stroke: BrushStroke }
   | { type: 'PAINT_COMMIT_STROKES'; strokes: BrushStroke[] }
+  | {
+      type: 'PAINT_COMMIT_AUTO_STROKE';
+      anchorMode: AutoAnchorMode;
+      newPlanarSurface?: PlanarDecalSurface | null;
+      planarStroke?: BrushStroke | null;
+      imageStroke?: ImageSpaceStroke | null;
+    }
   | { type: 'PAINT_UNDO' }
   | { type: 'PAINT_REDO' }
   | { type: 'PAINT_EXPORT_START' }
-  | { type: 'PAINT_EXPORT_DONE'; error?: string };
+  | { type: 'PAINT_EXPORT_DONE'; error?: string }
+  | { type: 'SET_WORKSPACE_MODE'; mode: WorkspaceMode; artworkId?: string | null }
+  | { type: 'ARTWORK_ADD'; artwork: Artwork; openCanvas?: boolean }
+  | { type: 'ARTWORK_UPDATE'; artwork: Artwork }
+  | { type: 'ARTWORK_SET_ACTIVE'; artworkId: string | null }
+  | { type: 'ARTWORK_REMOVE'; artworkId: string }
+  | { type: 'ARTWORK_COMMIT_STROKE'; stroke: BrushStroke }
+  | { type: 'ARTWORK_CLEAR' }
+  | { type: 'ARTWORK_UNDO' }
+  | { type: 'ARTWORK_REDO' }
+  | { type: 'PLACEMENT_ADD'; placement: ArtworkPlacement }
+  | { type: 'PLACEMENT_UPDATE'; placement: ArtworkPlacement; recordHistory?: boolean }
+  | { type: 'PLACEMENT_SET_ACTIVE'; placementId: string | null }
+  | { type: 'PLACEMENT_REMOVE'; placementId: string };
 
 const IDLE_GEOMETRY: GeometryState = {
   status: 'idle',
@@ -109,6 +136,7 @@ export const initialEditorState: EditorState = {
   transform: IDENTITY_TRANSFORM,
   zoomMode: 'fit',
   viewportSize: { width: 0, height: 0 },
+  workspaceMode: 'photo',
   activeTool: 'pointer',
   viewMode: 'rgb',
   geometry: IDLE_GEOMETRY,
@@ -130,6 +158,10 @@ function resetPaintToolOnReset(tool: EditorTool): EditorTool {
   return tool;
 }
 
+function resetGeometrySelectionTool(tool: EditorTool): EditorTool {
+  return tool === 'select-surface' ? 'pointer' : tool;
+}
+
 export function editorReducer(state: EditorState, action: EditorAction): EditorState {
   switch (action.type) {
     case 'IMPORT_START':
@@ -149,6 +181,7 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
         error: null,
         zoomMode: 'fit',
         transform,
+        workspaceMode: 'photo',
         activeTool: resetPaintToolOnReset(state.activeTool),
         viewMode: 'rgb',
         geometry: IDLE_GEOMETRY,
@@ -157,6 +190,9 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
           state.paint.brushConfig,
           state.paint.paintMode,
           state.paint.texturePreservation,
+          state.paint.artworks,
+          state.paint.activeArtworkId,
+          state.paint.nextArtworkNumber,
         ),
       };
     }
@@ -268,7 +304,8 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
       }
       if (
         (action.tool === 'brush' || action.tool === 'eraser') &&
-        (state.geometry.status !== 'ready' || state.paint.surfaces.length === 0)
+        !state.image &&
+        state.workspaceMode !== 'artwork'
       ) {
         return state;
       }
@@ -328,18 +365,13 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
       }
       return {
         ...state,
-        activeTool: resetPaintToolOnReset(state.activeTool),
+        activeTool: resetGeometrySelectionTool(state.activeTool),
         viewMode: 'rgb',
         geometry: {
           status: 'loading',
           data: null,
           error: null,
         },
-        paint: PaintDocument.createInitial(
-          state.paint.brushConfig,
-          state.paint.paintMode,
-          state.paint.texturePreservation,
-        ),
       };
     }
 
@@ -373,14 +405,9 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
     case 'GEOMETRY_CANCEL': {
       return {
         ...state,
-        activeTool: resetPaintToolOnReset(state.activeTool),
+        activeTool: resetGeometrySelectionTool(state.activeTool),
         viewMode: 'rgb',
         geometry: IDLE_GEOMETRY,
-        paint: PaintDocument.createInitial(
-          state.paint.brushConfig,
-          state.paint.paintMode,
-          state.paint.texturePreservation,
-        ),
       };
     }
 
@@ -475,14 +502,8 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
 
     case 'PAINT_REMOVE_SURFACE': {
       const nextPaint = PaintDocument.removeSurface(state.paint, action.surfaceId);
-      const nextTool =
-        nextPaint.surfaces.length === 0 &&
-        (state.activeTool === 'brush' || state.activeTool === 'eraser')
-          ? 'select-surface'
-          : state.activeTool;
       return {
         ...state,
-        activeTool: nextTool,
         paint: nextPaint,
       };
     }
@@ -535,16 +556,21 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
         paint: PaintDocument.commitStrokes(state.paint, action.strokes),
       };
 
-    case 'PAINT_UNDO': {
-      const nextPaint = PaintDocument.undo(state.paint);
-      const nextTool =
-        nextPaint.surfaces.length === 0 &&
-        (state.activeTool === 'brush' || state.activeTool === 'eraser')
-          ? 'select-surface'
-          : state.activeTool;
+    case 'PAINT_COMMIT_AUTO_STROKE':
       return {
         ...state,
-        activeTool: nextTool,
+        paint: PaintDocument.commitAutoStroke(state.paint, {
+          anchorMode: action.anchorMode,
+          newPlanarSurface: action.newPlanarSurface,
+          planarStroke: action.planarStroke,
+          imageStroke: action.imageStroke,
+        }),
+      };
+
+    case 'PAINT_UNDO': {
+      const nextPaint = PaintDocument.undo(state.paint);
+      return {
+        ...state,
         paint: nextPaint,
       };
     }
@@ -567,6 +593,144 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
         ...state,
         isExporting: false,
         error: action.error ?? state.error,
+      };
+
+    case 'SET_WORKSPACE_MODE': {
+      let nextPaint = state.paint;
+      if (action.artworkId !== undefined) {
+        nextPaint = PaintDocument.setActiveArtwork(nextPaint, action.artworkId);
+      }
+      const nextTool: EditorTool =
+        action.mode === 'artwork'
+          ? state.activeTool === 'eraser'
+            ? 'eraser'
+            : 'brush'
+          : state.image
+            ? state.activeTool === 'brush' || state.activeTool === 'eraser'
+              ? state.activeTool
+              : 'pointer'
+            : 'pointer';
+      return {
+        ...state,
+        workspaceMode: action.mode,
+        viewMode: action.mode === 'artwork' ? 'rgb' : state.viewMode,
+        activeTool: nextTool,
+        paint: nextPaint,
+      };
+    }
+
+    case 'ARTWORK_ADD': {
+      const nextPaint = PaintDocument.addArtwork(state.paint, action.artwork);
+      if (!action.openCanvas) {
+        return {
+          ...state,
+          paint: nextPaint,
+        };
+      }
+      return {
+        ...state,
+        workspaceMode: 'artwork',
+        viewMode: 'rgb',
+        activeTool: action.artwork.kind === 'drawn' ? 'brush' : 'pointer',
+        paint: nextPaint,
+      };
+    }
+
+    case 'ARTWORK_UPDATE':
+      return {
+        ...state,
+        paint: PaintDocument.updateArtwork(state.paint, action.artwork),
+      };
+
+    case 'ARTWORK_SET_ACTIVE':
+      return {
+        ...state,
+        paint: PaintDocument.setActiveArtwork(state.paint, action.artworkId),
+      };
+
+    case 'ARTWORK_REMOVE':
+      return {
+        ...state,
+        paint: PaintDocument.removeArtwork(state.paint, action.artworkId),
+      };
+
+    case 'ARTWORK_COMMIT_STROKE': {
+      const activeArt = PaintDocument.getActiveArtwork(state.paint);
+      if (!activeArt || activeArt.kind !== 'drawn') {
+        return state;
+      }
+      const updated = ArtworkModel.commitDrawnStroke(activeArt, action.stroke);
+      if (updated === activeArt) {
+        return state;
+      }
+      return {
+        ...state,
+        paint: PaintDocument.updateArtwork(state.paint, updated),
+      };
+    }
+
+    case 'ARTWORK_CLEAR': {
+      const activeArt = PaintDocument.getActiveArtwork(state.paint);
+      if (!activeArt || activeArt.kind !== 'drawn') {
+        return state;
+      }
+      const updated = ArtworkModel.clearDrawn(activeArt);
+      return updated === activeArt
+        ? state
+        : { ...state, paint: PaintDocument.updateArtwork(state.paint, updated) };
+    }
+
+    case 'ARTWORK_UNDO': {
+      const activeArt = PaintDocument.getActiveArtwork(state.paint);
+      if (!activeArt || activeArt.kind !== 'drawn') {
+        return state;
+      }
+      const updated = ArtworkModel.undoDrawn(activeArt);
+      return updated === activeArt
+        ? state
+        : { ...state, paint: PaintDocument.updateArtwork(state.paint, updated) };
+    }
+
+    case 'ARTWORK_REDO': {
+      const activeArt = PaintDocument.getActiveArtwork(state.paint);
+      if (!activeArt || activeArt.kind !== 'drawn') {
+        return state;
+      }
+      const updated = ArtworkModel.redoDrawn(activeArt);
+      return updated === activeArt
+        ? state
+        : { ...state, paint: PaintDocument.updateArtwork(state.paint, updated) };
+    }
+
+    case 'PLACEMENT_ADD':
+      return {
+        ...state,
+        workspaceMode: 'photo',
+        viewMode: 'rgb',
+        activeTool: 'pointer',
+        paint: PaintDocument.addPlacement(state.paint, action.placement),
+      };
+
+    case 'PLACEMENT_UPDATE':
+      return {
+        ...state,
+        paint: PaintDocument.updatePlacement(
+          state.paint,
+          action.placement,
+          action.recordHistory ?? true,
+        ),
+      };
+
+    case 'PLACEMENT_SET_ACTIVE':
+      return {
+        ...state,
+        paint: PaintDocument.setActivePlacement(state.paint, action.placementId),
+      };
+
+    case 'PLACEMENT_REMOVE':
+      return {
+        ...state,
+        paint: PaintDocument.removePlacement(state.paint, action.placementId),
       };
   }
 }

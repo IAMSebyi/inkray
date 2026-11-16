@@ -35,19 +35,23 @@ export function useKeyboardShortcuts(): { isSpacePressed: boolean } {
     setActiveTool,
     setBrushConfig,
     setPaintOverlayOptions,
+    removePlacement,
     undoPaint,
     redoPaint,
   } = useEditor();
   const [isSpacePressed, setIsSpacePressed] = useState(false);
 
   const hasImage = state.image !== null;
-  const hasSurfaces = state.paint.surfaces.length > 0;
-  const brushSizeRef = useRef(state.paint.brushConfig.sizeMultiplier);
+  const isArtworkMode = state.workspaceMode === 'artwork';
+  const hasOverlays = state.paint.surfaces.length > 0 || state.paint.artworkPlacements.length > 0;
+  const activePlacementId = state.paint.activePlacementId;
+  const activeTool = state.activeTool;
+  const brushPixelSizeRef = useRef(state.paint.brushConfig.pixelSize);
   const cleanPreviewRef = useRef(state.paint.cleanPreview);
 
   useEffect(() => {
-    brushSizeRef.current = state.paint.brushConfig.sizeMultiplier;
-  }, [state.paint.brushConfig.sizeMultiplier]);
+    brushPixelSizeRef.current = state.paint.brushConfig.pixelSize;
+  }, [state.paint.brushConfig.pixelSize]);
 
   useEffect(() => {
     cleanPreviewRef.current = state.paint.cleanPreview;
@@ -108,10 +112,6 @@ export function useKeyboardShortcuts(): { isSpacePressed: boolean } {
           setActiveTool('hand');
           return;
         }
-        if (lower === 's') {
-          setActiveTool('select-surface');
-          return;
-        }
         if (lower === 'b') {
           setActiveTool('brush');
           return;
@@ -120,21 +120,37 @@ export function useKeyboardShortcuts(): { isSpacePressed: boolean } {
           setActiveTool('eraser');
           return;
         }
-        if (lower === 'p' && hasSurfaces) {
+        if (lower === 'p' && !isArtworkMode && hasOverlays) {
           setPaintOverlayOptions({ cleanPreview: !cleanPreviewRef.current });
           return;
         }
         if (event.key === '[') {
-          setBrushConfig({ sizeMultiplier: brushSizeRef.current * 0.85 });
+          const next = Math.max(4, Math.min(240, Math.round(brushPixelSizeRef.current * 0.85)));
+          setBrushConfig({
+            pixelSize: next === brushPixelSizeRef.current ? Math.max(4, next - 2) : next,
+          });
           return;
         }
         if (event.key === ']') {
-          setBrushConfig({ sizeMultiplier: brushSizeRef.current * 1.18 });
+          const next = Math.max(4, Math.min(240, Math.round(brushPixelSizeRef.current * 1.18)));
+          setBrushConfig({
+            pixelSize: next === brushPixelSizeRef.current ? Math.min(240, next + 2) : next,
+          });
+          return;
+        }
+        if (
+          (event.key === 'Delete' || event.key === 'Backspace') &&
+          !isArtworkMode &&
+          activeTool === 'pointer' &&
+          activePlacementId
+        ) {
+          event.preventDefault();
+          removePlacement(activePlacementId);
           return;
         }
       }
 
-      if (!hasImage) {
+      if (!hasImage || isArtworkMode) {
         return;
       }
 
@@ -195,7 +211,10 @@ export function useKeyboardShortcuts(): { isSpacePressed: boolean } {
     };
   }, [
     hasImage,
-    hasSurfaces,
+    isArtworkMode,
+    hasOverlays,
+    activeTool,
+    activePlacementId,
     openFilePicker,
     fitToScreen,
     zoomToActualSize,
@@ -204,6 +223,7 @@ export function useKeyboardShortcuts(): { isSpacePressed: boolean } {
     setActiveTool,
     setBrushConfig,
     setPaintOverlayOptions,
+    removePlacement,
     undoPaint,
     redoPaint,
   ]);

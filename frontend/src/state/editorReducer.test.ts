@@ -3,6 +3,8 @@ import {
   buildSyntheticSurfaceSelection,
   createSyntheticPlanarScene,
 } from '../geometry/testFixtures';
+import { ArtworkModel } from '../painting/artwork';
+import { createAutomaticArtworkPlacement } from '../painting/artworkPlacement';
 import type { BrushStroke } from '../painting/brushEngine';
 import type { AppearanceData, GeometryData, LoadedImage } from '../types/editor';
 import { editorReducer, initialEditorState } from './editorReducer';
@@ -236,21 +238,24 @@ describe('editorReducer', () => {
     const selection1 = buildSyntheticSurfaceSelection(scene, 10, 12);
     const selection2 = buildSyntheticSurfaceSelection(scene, 14, 12);
 
-    // Painting tools stay disabled before geometry is ready.
-    let state = editorReducer(initialEditorState, { type: 'IMPORT_SUCCESS', image: img1 });
+    // Surface selection still requires geometry, while Brush & Eraser work immediately once an image is loaded.
+    let state = editorReducer(initialEditorState, { type: 'SET_ACTIVE_TOOL', tool: 'brush' });
+    expect(state.activeTool).toBe('pointer');
+
+    state = editorReducer(initialEditorState, { type: 'IMPORT_SUCCESS', image: img1 });
     state = editorReducer(state, { type: 'SET_ACTIVE_TOOL', tool: 'select-surface' });
     expect(state.activeTool).toBe('pointer');
 
+    state = editorReducer(state, { type: 'SET_ACTIVE_TOOL', tool: 'brush' });
+    expect(state.activeTool).toBe('brush');
+    state = editorReducer(state, { type: 'SET_ACTIVE_TOOL', tool: 'eraser' });
+    expect(state.activeTool).toBe('eraser');
+
     state = editorReducer(state, { type: 'GEOMETRY_START' });
+    expect(state.activeTool).toBe('eraser');
     state = editorReducer(state, { type: 'GEOMETRY_SUCCESS', data: geom1 });
 
-    // Brush and eraser stay disabled until at least one planar surface is selected.
-    state = editorReducer(state, { type: 'SET_ACTIVE_TOOL', tool: 'brush' });
-    expect(state.activeTool).toBe('pointer');
-    state = editorReducer(state, { type: 'SET_ACTIVE_TOOL', tool: 'eraser' });
-    expect(state.activeTool).toBe('pointer');
-
-    // Selecting surfaces keeps select-surface tool active for multi-surface picking.
+    // Selecting surfaces manually remains functional internally.
     state = editorReducer(state, { type: 'SET_ACTIVE_TOOL', tool: 'select-surface' });
     state = editorReducer(state, { type: 'PAINT_SELECT_SURFACE_START' });
     expect(state.paint.isSelectingSurface).toBe(true);
@@ -352,11 +357,11 @@ describe('editorReducer', () => {
     // Clean preview toggle hides overlays cleanly without erasing checkbox preferences.
     state = editorReducer(state, {
       type: 'PAINT_SET_OVERLAY_OPTIONS',
-      patch: { cleanPreview: true },
+      patch: { showSupportOverlay: true, cleanPreview: true },
     });
     expect(state.paint.cleanPreview).toBe(true);
     expect(state.paint.showSupportOverlay).toBe(true);
-    expect(state.paint.showFootprintPreview).toBe(true);
+    expect(state.paint.showFootprintPreview).toBe(false);
 
     // Switching compositing modes & texture strength works independently of stroke undo history.
     state = editorReducer(state, { type: 'PAINT_SET_MODE', mode: 'texture' });
@@ -401,5 +406,104 @@ describe('editorReducer', () => {
     state = editorReducer(state, { type: 'APPEARANCE_CANCEL' });
     expect(state.appearance.status).toBe('idle');
     expect(state.viewMode).toBe('rgb');
+  });
+
+  it('allows immediate 2D brush painting on import and commits auto strokes cleanly across geometry transitions', () => {
+    const img = createStubImage('auto-photo', 32, 32);
+    const geom = createStubGeometry('auto-photo');
+
+    let state = editorReducer(initialEditorState, { type: 'IMPORT_SUCCESS', image: img });
+    state = editorReducer(state, { type: 'SET_ACTIVE_TOOL', tool: 'brush' });
+    expect(state.activeTool).toBe('brush');
+
+    state = editorReducer(state, {
+      type: 'PAINT_COMMIT_AUTO_STROKE',
+      anchorMode: 'fallback-2d',
+      imageStroke: {
+        id: 'pre-geom-2d',
+        layer: 'fallback-2d',
+        mode: 'paint',
+        brush: { diameter: 20, color: '#ff5500', opacity: 0.9, hardness: 0.8 },
+        layerWidth: 32,
+        layerHeight: 32,
+        bounds: { minX: 4, minY: 4, maxX: 8, maxY: 8 },
+        alphaMask: new Uint8Array(25).fill(255),
+      },
+    });
+    expect(state.paint.lastAnchorMode).toBe('fallback-2d');
+    expect(state.paint.imageStrokes.length).toBe(1);
+
+    // Running geometry preserves brush tool and existing 2D paint!
+    state = editorReducer(state, { type: 'GEOMETRY_START' });
+    expect(state.activeTool).toBe('brush');
+    expect(state.paint.imageStrokes.length).toBe(1);
+    state = editorReducer(state, { type: 'GEOMETRY_SUCCESS', data: geom });
+    expect(state.activeTool).toBe('brush');
+
+    // Undo works consistently back through auto strokes while keeping Brush active.
+    state = editorReducer(state, { type: 'PAINT_UNDO' });
+    expect(state.paint.imageStrokes.length).toBe(0);
+    expect(state.activeTool).toBe('brush');
+  });
+
+  it('manages independent artwork canvas editing, placements, and preserves artworks across photo replacement', () => {
+    const photoA = createStubImage('photo-a', 400, 300);
+    const photoB = createStubImage('photo-b', 640, 480);
+
+    // Create a blank drawn artwork and open canvas even before importing a photo.
+    const art = ArtworkModel.createBlank({ name: 'Badge', width: 256, height: 256 });
+    let state = editorReducer(initialEditorState, {
+      type: 'ARTWORK_ADD',
+      artwork: art,
+      openCanvas: true,
+    });
+    expect(state.workspaceMode).toBe('artwork');
+    expect(state.activeTool).toBe('brush');
+
+    // Draw stroke, undo/redo on drawn artwork directly in reducer.
+    state = editorReducer(state, {
+      type: 'ARTWORK_COMMIT_STROKE',
+      stroke: {
+        id: 'badge-s1',
+        surfaceId: art.id,
+        mode: 'paint',
+        brush: { diameter: 16, color: '#ff00aa', opacity: 1, hardness: 0.9 },
+        points: [{ u: 128, v: 128 }],
+      },
+    });
+    expect(
+      state.paint.artworks[0]?.kind === 'drawn' && state.paint.artworks[0].strokes.length,
+    ).toBe(1);
+    state = editorReducer(state, { type: 'ARTWORK_UNDO' });
+    expect(
+      state.paint.artworks[0]?.kind === 'drawn' && state.paint.artworks[0].strokes.length,
+    ).toBe(0);
+    state = editorReducer(state, { type: 'ARTWORK_REDO' });
+    expect(
+      state.paint.artworks[0]?.kind === 'drawn' && state.paint.artworks[0].strokes.length,
+    ).toBe(1);
+
+    // Import photoA and place artwork onto photoA cleanly.
+    state = editorReducer(state, { type: 'IMPORT_SUCCESS', image: photoA });
+    expect(state.workspaceMode).toBe('photo');
+    expect(state.paint.artworks.length).toBe(1);
+
+    const activeArt = state.paint.artworks[0];
+    if (!activeArt) throw new Error('Expected preserved artwork');
+    const placement = createAutomaticArtworkPlacement({
+      artwork: activeArt,
+      imagePoint: { x: 200, y: 150 },
+      imageSize: { width: 400, height: 300 },
+      geometry: null,
+    });
+    state = editorReducer(state, { type: 'PLACEMENT_ADD', placement });
+    expect(state.paint.artworkPlacements.length).toBe(1);
+    expect(state.paint.activePlacementId).toBe(placement.id);
+
+    // Replacing photoA with photoB resets photoA placements cleanly while preserving the artwork asset!
+    state = editorReducer(state, { type: 'IMPORT_SUCCESS', image: photoB });
+    expect(state.paint.artworkPlacements.length).toBe(0);
+    expect(state.paint.artworks.length).toBe(1);
+    expect(state.paint.artworks[0]?.id).toBe(art.id);
   });
 });

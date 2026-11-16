@@ -1,3 +1,4 @@
+import { ArtworkCanvasView } from './components/ArtworkCanvasView';
 import { LeftToolbar } from './components/LeftToolbar';
 import { RightSidebar } from './components/RightSidebar';
 import { StatusBar } from './components/StatusBar';
@@ -10,9 +11,17 @@ import { EditorProvider } from './state/EditorContext';
 import { IMAGE_FILE_ACCEPT } from './utils/fileValidation';
 
 function InkrayEditorShell() {
-  const { fileInputRef } = useEditor();
+  const { state, fileInputRef, artworkFileInputRef, importArtworkFile } = useEditor();
   const { isSpacePressed } = useKeyboardShortcuts();
   const { isDragActive, handleFileInputChange, dropZoneProps } = useImageImport();
+
+  const handleArtworkFileInputChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (file) {
+      void importArtworkFile(file);
+    }
+  };
 
   return (
     <div className="editor-shell">
@@ -26,15 +35,29 @@ function InkrayEditorShell() {
         onChange={handleFileInputChange}
       />
 
+      <input
+        ref={artworkFileInputRef}
+        type="file"
+        accept={IMAGE_FILE_ACCEPT}
+        className="visually-hidden-input"
+        aria-hidden="true"
+        tabIndex={-1}
+        onChange={handleArtworkFileInputChange}
+      />
+
       <TopToolbar />
 
       <div className="editor-workspace">
         <LeftToolbar />
-        <EditorViewport
-          isSpacePressed={isSpacePressed}
-          isDragActive={isDragActive}
-          dropZoneProps={dropZoneProps}
-        />
+        {state.workspaceMode === 'artwork' ? (
+          <ArtworkCanvasView />
+        ) : (
+          <EditorViewport
+            isSpacePressed={isSpacePressed}
+            isDragActive={isDragActive}
+            dropZoneProps={dropZoneProps}
+          />
+        )}
         <RightSidebar />
       </div>
 

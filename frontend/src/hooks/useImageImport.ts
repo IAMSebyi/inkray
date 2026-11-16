@@ -74,6 +74,9 @@ export function useImageImport() {
 
   const handleDrop = useCallback(
     (event: React.DragEvent<HTMLElement>) => {
+      if (!hasDraggedFiles(event.dataTransfer)) {
+        return;
+      }
       event.preventDefault();
       event.stopPropagation();
       dragDepthRef.current = 0;

@@ -1,5 +1,22 @@
-import { parseNormalizedIntrinsics, projectOpenCvPointToImage } from '../geometry/geometryAccess';
+import type { AutoAnchorMode } from '../geometry/autoSurfaceAnchor';
+import {
+  type ParsedIntrinsics,
+  parseNormalizedIntrinsics,
+  projectOpenCvPointToImage,
+} from '../geometry/geometryAccess';
+import {
+  buildMetricEllipseImagePolygon,
+  computeInterpolatedSurfaceMetric,
+  computeSurfaceBrushRadius,
+} from '../geometry/localSurfaceMetric';
+import {
+  type SurfaceGridIndex,
+  getSurfaceGridIndex,
+  pickSurfaceHit,
+} from '../geometry/surfacePicking';
+import { type ArtworkPlacement, computePlacementImageQuad } from '../painting/artworkPlacement';
 import { PaintDocument, type PaintDocumentState } from '../painting/paintDocument';
+import type { PlanarDecalSurface } from '../painting/planarDecal';
 import { clamp } from './viewportTransforms';
 import { findSurfaceOwnerAtImagePoint } from '../painting/planeVisibility';
 import type {
@@ -22,6 +39,88 @@ export interface BrushCursorPreview {
   onSurface: boolean;
 }
 
+function mapImagePolygonToViewport(
+  polygon: readonly Point2D[],
+  transform: ViewportTransform,
+  viewportPoint: Point2D,
+): Point2D[] | null {
+  if (polygon.length < 3) {
+    return null;
+  }
+  const out: Point2D[] = [];
+  for (let i = 0; i < polygon.length; i++) {
+    const pt = polygon[i];
+    if (!pt) {
+      return null;
+    }
+    const sx = pt.x * transform.zoom + transform.panX;
+    const sy = pt.y * transform.zoom + transform.panY;
+    if (!Number.isFinite(sx) || !Number.isFinite(sy)) {
+      return null;
+    }
+    if (Math.hypot(sx - viewportPoint.x, sy - viewportPoint.y) > 600) {
+      return null;
+    }
+    out.push({ x: sx, y: sy });
+  }
+  return out;
+}
+
+function projectPlanarRingToViewport(
+  surface: PlanarDecalSurface,
+  centerU: number,
+  centerV: number,
+  radiusWorld: number,
+  intr: ParsedIntrinsics,
+  imageSize: Size2D,
+  transform: ViewportTransform,
+  viewportPoint: Point2D,
+): Point2D[] | null {
+  const segments = 28;
+  const polygon: Point2D[] = [];
+  for (let i = 0; i < segments; i++) {
+    const theta = (i / segments) * Math.PI * 2;
+    const worldPt = surface.frame.localToWorld(
+      centerU + Math.cos(theta) * radiusWorld,
+      centerV + Math.sin(theta) * radiusWorld,
+    );
+    if (worldPt[2] <= 0.05) {
+      return null;
+    }
+    const imgProj = projectOpenCvPointToImage(worldPt, intr, imageSize);
+    if (!imgProj) {
+      return null;
+    }
+    const sx = imgProj.x * transform.zoom + transform.panX;
+    const sy = imgProj.y * transform.zoom + transform.panY;
+    if (Math.hypot(sx - viewportPoint.x, sy - viewportPoint.y) > 600) {
+      return null;
+    }
+    polygon.push({ x: sx, y: sy });
+  }
+  return polygon;
+}
+
+function projectMetricRingToViewport(
+  gridIndex: SurfaceGridIndex,
+  geometry: GeometryData,
+  imagePoint: Point2D,
+  radiusWorld: number,
+  imageSize: Size2D,
+  transform: ViewportTransform,
+  viewportPoint: Point2D,
+): Point2D[] | null {
+  const metric = computeInterpolatedSurfaceMetric(gridIndex, geometry, imagePoint, imageSize);
+  if (!metric.valid) {
+    return null;
+  }
+  const imagePolygon = buildMetricEllipseImagePolygon(metric, imagePoint, radiusWorld, 28);
+  if (!imagePolygon) {
+    return null;
+  }
+  return mapImagePolygonToViewport(imagePolygon, transform, viewportPoint);
+}
+
 export function buildBrushCursorPreview(params: {
   tool: EditorTool;
   viewportPoint: Point2D;
@@ -29,96 +128,138 @@ export function buildBrushCursorPreview(params: {
   transform: ViewportTransform;
   geometry: GeometryData | null;
   paintDoc: PaintDocumentState;
+  activeAnchorMode?: AutoAnchorMode | null;
+  activePlanarSurface?: PlanarDecalSurface | null;
+  activeSurfaceRadius?: number | null;
+  activeComponentMask?: Uint8Array | null;
 }): BrushCursorPreview | null {
-  const { tool, viewportPoint, imageSize, transform, geometry, paintDoc } = params;
-  if ((tool !== 'brush' && tool !== 'eraser') || !geometry || paintDoc.surfaces.length === 0) {
-    return null;
-  }
+  const {
+    tool,
+    viewportPoint,
+    imageSize,
+    transform,
+    geometry,
+    paintDoc,
+    activeAnchorMode = null,
+    activePlanarSurface = null,
+    activeSurfaceRadius = null,
+    activeComponentMask = null,
+  } = params;
 
-  const fakeRect = { left: 0, top: 0, width: 1, height: 1 } as DOMRect;
-  const imagePoint = clientToImage(viewportPoint, fakeRect, transform);
-  const owner = findSurfaceOwnerAtImagePoint(paintDoc.surfaces, imagePoint, imageSize, geometry);
-  const refSurface =
-    owner ?? PaintDocument.getActiveSurface(paintDoc) ?? paintDoc.surfaces[0] ?? null;
-  if (!refSurface) {
+  if ((tool !== 'brush' && tool !== 'eraser') || imageSize.width <= 0 || imageSize.height <= 0) {
     return null;
   }
 
   const mode: 'paint' | 'erase' = tool === 'eraser' ? 'erase' : 'paint';
-  const intr = parseNormalizedIntrinsics(geometry.metadata.intrinsics);
-  const brush = PaintDocument.getEffectiveBrushSettingsForSurface(paintDoc, refSurface);
-  const radius = brush.diameter * 0.5;
-  const hit = refSurface.frame.imagePointToPlane(imagePoint, imageSize, intr);
-  const approxDepth = hit ? hit.depth : Math.max(0.1, Math.abs(refSurface.frame.origin[2]));
-  const fallbackRadiusPx = clamp(
-    (radius / approxDepth) * intr.fx * imageSize.width * transform.zoom,
-    3,
-    240,
-  );
+  const pixelRadiusPx = clamp(paintDoc.brushConfig.pixelSize * 0.5 * transform.zoom, 3, 240);
 
-  if (!hit || !owner) {
+  if (!geometry || activeAnchorMode === 'fallback-2d') {
     return {
       mode,
       viewportPoint,
       screenPolygon: null,
-      fallbackRadiusPx,
-      onSurface: owner !== null,
+      fallbackRadiusPx: pixelRadiusPx,
+      onSurface: activeAnchorMode === 'fallback-2d',
     };
   }
 
-  const segments = 28;
-  const polygon: Point2D[] = [];
-  for (let i = 0; i < segments; i++) {
-    const theta = (i / segments) * Math.PI * 2;
-    const worldPt = refSurface.frame.localToWorld(
-      hit.u + Math.cos(theta) * radius,
-      hit.v + Math.sin(theta) * radius,
+  const fakeRect = { left: 0, top: 0, width: 1, height: 1 } as DOMRect;
+  const imagePoint = clientToImage(viewportPoint, fakeRect, transform);
+  const intr = parseNormalizedIntrinsics(geometry.metadata.intrinsics);
+
+  if (activeAnchorMode === 'planar' && activePlanarSurface) {
+    const planeHit = activePlanarSurface.frame.imagePointToPlane(imagePoint, imageSize, intr);
+    const radiusWorld =
+      activeSurfaceRadius ??
+      PaintDocument.getEffectiveBrushSettingsForSurface(paintDoc, activePlanarSurface).diameter *
+        0.5;
+    const approxDepth = planeHit
+      ? planeHit.depth
+      : Math.max(0.1, Math.abs(activePlanarSurface.frame.origin[2]));
+    const fallbackRadiusPx = clamp(
+      (radiusWorld / approxDepth) * intr.fx * imageSize.width * transform.zoom,
+      3,
+      240,
     );
-    if (worldPt[2] <= 0.05) {
+    const owner = findSurfaceOwnerAtImagePoint(
+      [activePlanarSurface],
+      imagePoint,
+      imageSize,
+      geometry,
+    );
+    if (!planeHit || !owner) {
       return {
         mode,
         viewportPoint,
         screenPolygon: null,
         fallbackRadiusPx,
-        onSurface: true,
+        onSurface: false,
       };
     }
-    const imgProj = projectOpenCvPointToImage(worldPt, intr, imageSize);
-    if (!imgProj) {
-      return {
-        mode,
-        viewportPoint,
-        screenPolygon: null,
-        fallbackRadiusPx,
-        onSurface: true,
-      };
-    }
-    const sx = imgProj.x * transform.zoom + transform.panX;
-    const sy = imgProj.y * transform.zoom + transform.panY;
-    if (Math.hypot(sx - viewportPoint.x, sy - viewportPoint.y) > 600) {
-      return {
-        mode,
-        viewportPoint,
-        screenPolygon: null,
-        fallbackRadiusPx,
-        onSurface: true,
-      };
-    }
-    polygon.push({ x: sx, y: sy });
+    const poly = projectPlanarRingToViewport(
+      activePlanarSurface,
+      planeHit.u,
+      planeHit.v,
+      radiusWorld,
+      intr,
+      imageSize,
+      transform,
+      viewportPoint,
+    );
+    return {
+      mode,
+      viewportPoint,
+      screenPolygon: poly,
+      fallbackRadiusPx,
+      onSurface: true,
+    };
   }
+
+  const surfaceHit = pickSurfaceHit(geometry, imagePoint, imageSize);
+  if (!surfaceHit.valid || !surfaceHit.pixel || surfaceHit.depth === null) {
+    return {
+      mode,
+      viewportPoint,
+      screenPolygon: null,
+      fallbackRadiusPx: pixelRadiusPx,
+      onSurface: false,
+    };
+  }
+
+  const gridIndex = getSurfaceGridIndex(geometry);
+  const onActiveComponent =
+    !activeComponentMask ||
+    activeComponentMask[surfaceHit.pixel.y * gridIndex.width + surfaceHit.pixel.x] === 1;
+  const radiusWorld =
+    activeSurfaceRadius ??
+    computeSurfaceBrushRadius(surfaceHit.depth, paintDoc.brushConfig.pixelSize, intr, imageSize);
+  const fallbackRadiusPx = clamp(
+    (radiusWorld / Math.max(0.1, surfaceHit.depth)) * intr.fx * imageSize.width * transform.zoom,
+    3,
+    240,
+  );
+  const screenPolygon = projectMetricRingToViewport(
+    gridIndex,
+    geometry,
+    imagePoint,
+    radiusWorld,
+    imageSize,
+    transform,
+    viewportPoint,
+  );
 
   return {
     mode,
     viewportPoint,
-    screenPolygon: polygon,
+    screenPolygon,
     fallbackRadiusPx,
-    onSurface: true,
+    onSurface: onActiveComponent,
   };
 }
 
 let cachedCheckerPatternCanvas: HTMLCanvasElement | null = null;
 
-function getCheckerboardTileCanvas(): HTMLCanvasElement {
+export function getCheckerboardTileCanvas(): HTMLCanvasElement {
   if (cachedCheckerPatternCanvas) {
     return cachedCheckerPatternCanvas;
   }
@@ -142,6 +283,66 @@ function getCheckerboardTileCanvas(): HTMLCanvasElement {
   return tile;
 }
 
+export interface PlacementGizmoOverlay {
+  corners: [Point2D, Point2D, Point2D, Point2D];
+  outlinePolygon?: Point2D[];
+  center: Point2D;
+  topMid: Point2D;
+  rotationHandle: Point2D;
+  isPlanar: boolean;
+  isCurved: boolean;
+  isApproximatelyPlanar: boolean;
+}
+
+export function buildPlacementGizmoOverlay(params: {
+  placement: ArtworkPlacement;
+  imageSize: Size2D;
+  transform: ViewportTransform;
+  geometry: GeometryData | null;
+}): PlacementGizmoOverlay | null {
+  const { placement, imageSize, transform, geometry } = params;
+  if (!placement.visible) {
+    return null;
+  }
+  const quad = computePlacementImageQuad(placement, imageSize, geometry);
+  if (!quad) {
+    return null;
+  }
+  const toScreen = (pt: Point2D): Point2D => ({
+    x: pt.x * transform.zoom + transform.panX,
+    y: pt.y * transform.zoom + transform.panY,
+  });
+  const corners: [Point2D, Point2D, Point2D, Point2D] = [
+    toScreen(quad.corners[0]),
+    toScreen(quad.corners[1]),
+    toScreen(quad.corners[2]),
+    toScreen(quad.corners[3]),
+  ];
+  const outlinePolygon = quad.outlinePolygon?.map(toScreen);
+  const center = toScreen(quad.center);
+  const topMid = toScreen(quad.topMid);
+  const dx = topMid.x - center.x;
+  const dy = topMid.y - center.y;
+  const len = Math.hypot(dx, dy);
+  const ux = len > 1e-3 ? dx / len : 0;
+  const uy = len > 1e-3 ? dy / len : -1;
+  const rotationHandle: Point2D = {
+    x: topMid.x + ux * 24,
+    y: topMid.y + uy * 24,
+  };
+  return {
+    corners,
+    outlinePolygon,
+    center,
+    topMid,
+    rotationHandle,
+    isPlanar: placement.mapping.type === 'planar',
+    isCurved: placement.mapping.type === 'curved',
+    isApproximatelyPlanar:
+      placement.mapping.type === 'planar' && placement.mapping.isApproximatelyPlanar,
+  };
+}
+
 export interface CanvasRenderParams {
   viewportSize: Size2D;
   dpr: number;
@@ -152,6 +353,7 @@ export interface CanvasRenderParams {
   appearance?: AppearanceData | null;
   borderOnly?: boolean;
   brushCursor?: BrushCursorPreview | null;
+  placementGizmo?: PlacementGizmoOverlay | null;
 }
 
 export function syncCanvasBackingSize(
@@ -188,6 +390,7 @@ export function renderViewportCanvas(
     appearance = null,
     borderOnly = false,
     brushCursor = null,
+    placementGizmo = null,
   } = params;
   const safeDpr = Number.isFinite(dpr) && dpr > 0 ? dpr : 1;
   const backingSize = syncCanvasBackingSize(ctx.canvas, viewportSize, safeDpr);
@@ -284,6 +487,79 @@ export function renderViewportCanvas(
   ctx.strokeStyle = 'rgba(255, 255, 255, 0.14)';
   ctx.lineWidth = 1 / safeDpr;
   ctx.strokeRect(bounds.x, bounds.y, bounds.width, bounds.height);
+
+  if (placementGizmo) {
+    const accentColor = placementGizmo.isCurved
+      ? '#38bdf8'
+      : placementGizmo.isApproximatelyPlanar
+        ? '#f59e0b'
+        : placementGizmo.isPlanar
+          ? '#4c8dff'
+          : '#34d399';
+    ctx.save();
+    if (!placementGizmo.isPlanar && !placementGizmo.isCurved) {
+      ctx.setLineDash([5, 4]);
+    }
+    ctx.beginPath();
+    const outline =
+      placementGizmo.outlinePolygon && placementGizmo.outlinePolygon.length >= 4
+        ? placementGizmo.outlinePolygon
+        : placementGizmo.corners;
+    const firstPt = outline[0];
+    if (firstPt) {
+      ctx.moveTo(firstPt.x, firstPt.y);
+      for (let i = 1; i < outline.length; i++) {
+        const pt = outline[i];
+        if (pt) ctx.lineTo(pt.x, pt.y);
+      }
+      ctx.closePath();
+    }
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.72)';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.strokeStyle = accentColor;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Rotation stem and knob outside the projected top edge.
+    ctx.beginPath();
+    ctx.moveTo(placementGizmo.topMid.x, placementGizmo.topMid.y);
+    ctx.lineTo(placementGizmo.rotationHandle.x, placementGizmo.rotationHandle.y);
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.72)';
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+    ctx.strokeStyle = accentColor;
+    ctx.lineWidth = 1.25;
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.arc(placementGizmo.rotationHandle.x, placementGizmo.rotationHandle.y, 5.5, 0, Math.PI * 2);
+    ctx.fillStyle = accentColor;
+    ctx.fill();
+    ctx.strokeStyle = '#0d1016';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    for (let i = 0; i < placementGizmo.corners.length; i++) {
+      const corner = placementGizmo.corners[i];
+      if (!corner) continue;
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(corner.x - 4, corner.y - 4, 8, 8);
+      ctx.strokeStyle = accentColor;
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(corner.x - 4, corner.y - 4, 8, 8);
+    }
+
+    ctx.beginPath();
+    ctx.arc(placementGizmo.center.x, placementGizmo.center.y, 3, 0, Math.PI * 2);
+    ctx.fillStyle = '#ffffff';
+    ctx.fill();
+    ctx.strokeStyle = accentColor;
+    ctx.lineWidth = 1.25;
+    ctx.stroke();
+    ctx.restore();
+  }
 
   if (brushCursor) {
     const buildCursorPath = () => {

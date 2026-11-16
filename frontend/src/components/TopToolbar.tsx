@@ -4,6 +4,7 @@ import {
   Eye,
   EyeOff,
   FolderOpen,
+  ImagePlus,
   Maximize2,
   Minus,
   Plus,
@@ -13,6 +14,7 @@ import {
   X,
 } from 'lucide-react';
 import { useEditor } from '../hooks/useEditor';
+import { ArtworkModel } from '../painting/artwork';
 import { PaintDocument } from '../painting/paintDocument';
 import type { ViewMode } from '../types/editor';
 import { formatZoomPercent } from '../utils/format';
@@ -61,6 +63,8 @@ export function TopToolbar() {
   const {
     state,
     openFilePicker,
+    openArtworkEditor,
+    returnToPhoto,
     fitToScreen,
     zoomToActualSize,
     zoomIn,
@@ -77,23 +81,34 @@ export function TopToolbar() {
   } = useEditor();
 
   const hasImage = state.image !== null;
+  const isArtworkMode = state.workspaceMode === 'artwork';
+  const activeArtwork = PaintDocument.getActiveArtwork(state.paint);
   const geometryData = state.geometry.data;
   const hasGeometry = geometryData !== null;
   const isGeneratingGeometry = state.geometry.status === 'loading';
   const hasAppearance = state.appearance.data !== null;
   const isGeneratingAppearance = state.appearance.status === 'loading';
-  const isPointCloudMode = state.viewMode === 'pointcloud' || state.viewMode === 'mesh';
-  const hasSurfaces = state.paint.surfaces.length > 0;
+  const isPointCloudMode =
+    !isArtworkMode &&
+    (state.viewMode === 'pointcloud' || state.viewMode === 'mesh') &&
+    geometryData !== null;
+  const hasOverlays = state.paint.surfaces.length > 0 || state.paint.artworkPlacements.length > 0;
   const isCleanPreview = state.paint.cleanPreview;
-  const zoomDisabled = !hasImage || isPointCloudMode;
-  const canUndo = PaintDocument.canUndo(state.paint);
-  const canRedo = PaintDocument.canRedo(state.paint);
-  const canExport = hasImage && hasGeometry && !state.isExporting;
-  const zoomLabel = !hasImage
-    ? '—'
-    : isPointCloudMode
-      ? '3D'
-      : formatZoomPercent(state.transform.zoom);
+  const zoomDisabled = isArtworkMode || !hasImage || isPointCloudMode;
+  const canUndo = isArtworkMode
+    ? ArtworkModel.canUndo(activeArtwork)
+    : PaintDocument.canUndo(state.paint);
+  const canRedo = isArtworkMode
+    ? ArtworkModel.canRedo(activeArtwork)
+    : PaintDocument.canRedo(state.paint);
+  const canExport = hasImage && !state.isExporting;
+  const zoomLabel = isArtworkMode
+    ? 'Art'
+    : !hasImage
+      ? '—'
+      : isPointCloudMode
+        ? '3D'
+        : formatZoomPercent(state.transform.zoom);
 
   const blurAfterAction = (event: React.MouseEvent<HTMLButtonElement>, action: () => void) => {
     event.currentTarget.blur();
@@ -208,14 +223,35 @@ export function TopToolbar() {
 
         <button
           type="button"
-          className={`toolbar-button ${hasSurfaces && isCleanPreview ? 'is-active' : ''}`}
+          className={`toolbar-button ${isArtworkMode ? 'is-active' : ''}`}
+          onClick={(e) =>
+            blurAfterAction(e, () => {
+              if (isArtworkMode) {
+                returnToPhoto();
+              } else {
+                openArtworkEditor();
+              }
+            })
+          }
+          aria-pressed={isArtworkMode}
+          title={
+            isArtworkMode ? 'Return to photograph viewport' : 'Open 2D transparent artwork canvas'
+          }
+        >
+          <ImagePlus size={14} strokeWidth={1.75} />
+          <span>{isArtworkMode ? 'Photo View' : 'Artwork'}</span>
+        </button>
+
+        <button
+          type="button"
+          className={`toolbar-button ${hasOverlays && isCleanPreview ? 'is-active' : ''}`}
           onClick={(e) =>
             blurAfterAction(e, () => setPaintOverlayOptions({ cleanPreview: !isCleanPreview }))
           }
-          disabled={!hasGeometry || !hasSurfaces}
-          aria-pressed={hasSurfaces && isCleanPreview}
+          disabled={isArtworkMode || !hasOverlays}
+          aria-pressed={hasOverlays && isCleanPreview}
           aria-label="Toggle clean final preview"
-          title="Hide or show surface overlays to inspect the final painted image (P)"
+          title="Hide or show overlays and artwork handles to inspect the final image (P)"
         >
           {isCleanPreview ? (
             <Eye size={14} strokeWidth={1.75} />
@@ -248,6 +284,7 @@ export function TopToolbar() {
             const isAppearanceMode =
               option.mode === 'albedo' || option.mode === 'shading' || option.mode === 'residual';
             const optionDisabled =
+              isArtworkMode ||
               !hasImage ||
               (isAppearanceMode ? !hasAppearance : option.mode !== 'rgb' && !hasGeometry) ||
               (option.mode === 'normals' && !geometryData?.previews.normals);

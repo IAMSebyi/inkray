@@ -2,8 +2,18 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, type ReactNode } f
 import { fetchAppearanceForImage } from '../api/appearanceClient';
 import { fetchGeometryForImage, selectSurfaceForGeometry } from '../api/geometryClient';
 import { ImageLoadError, loadImageFromFile } from '../editor/imageLoader';
+import type { AutoAnchorMode } from '../geometry/autoSurfaceAnchor';
+import { ArtworkModel } from '../painting/artwork';
+import {
+  type ArtworkPlacement,
+  createAutomaticArtworkPlacement,
+  estimatePlacementImageCenter,
+  reanchorArtworkPlacement,
+} from '../painting/artworkPlacement';
 import { BrushEngine, type BrushStroke } from '../painting/brushEngine';
-import type { BrushUiConfig } from '../painting/paintDocument';
+import { ImageSpaceBrushEngine, type ImageSpaceStroke } from '../painting/imageSpacePaint';
+import { PaintDocument, type BrushUiConfig } from '../painting/paintDocument';
+import type { PlanarDecalSurface } from '../painting/planarDecal';
 import type { PlanarPaintRenderer } from '../painting/planarPaintRenderer';
 import type {
   EditorTool,
@@ -43,6 +53,8 @@ function buildExportFilename(sourceName: string): string {
 export function EditorProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(editorReducer, initialEditorState);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const artworkFileInputRef = useRef<HTMLInputElement | null>(null);
+  const importedArtImagesRef = useRef<Set<LoadedImage>>(new Set());
   const cursorStoreRef = useRef<CursorStore | null>(null);
   if (cursorStoreRef.current === null) {
     cursorStoreRef.current = createCursorStore();
@@ -50,7 +62,13 @@ export function EditorProvider({ children }: { children: ReactNode }) {
   const cursorStore = cursorStoreRef.current;
 
   const brushEngineRef = useRef<BrushEngine>(new BrushEngine());
+  const imageBrushEngineRef = useRef<ImageSpaceBrushEngine>(new ImageSpaceBrushEngine());
   const paintRendererRef = useRef<PlanarPaintRenderer | null>(null);
+
+  const cancelActiveStrokes = useCallback(() => {
+    brushEngineRef.current.cancelStroke();
+    imageBrushEngineRef.current.cancelStroke();
+  }, []);
 
   const activeAbortRef = useRef<AbortController | null>(null);
   const geometryAbortRef = useRef<AbortController | null>(null);
@@ -67,17 +85,26 @@ export function EditorProvider({ children }: { children: ReactNode }) {
   }, [state.image]);
 
   useEffect(() => {
+    const importedImages = importedArtImagesRef.current;
     return () => {
       activeAbortRef.current?.abort();
       geometryAbortRef.current?.abort();
       appearanceAbortRef.current?.abort();
       surfaceSelectAbortRef.current?.abort();
       activeImageRef.current?.dispose();
+      for (const artImg of importedImages) {
+        artImg.dispose();
+      }
+      importedImages.clear();
     };
   }, []);
 
   const openFilePicker = useCallback(() => {
     fileInputRef.current?.click();
+  }, []);
+
+  const openArtworkFilePicker = useCallback(() => {
+    artworkFileInputRef.current?.click();
   }, []);
 
   const importFile = useCallback(
@@ -106,7 +133,7 @@ export function EditorProvider({ children }: { children: ReactNode }) {
 
         const previousImage = activeImageRef.current;
         activeImageRef.current = nextImage;
-        brushEngineRef.current.cancelStroke();
+        cancelActiveStrokes();
         dispatch({ type: 'IMPORT_SUCCESS', image: nextImage });
         cursorStore.setSample(null);
 
@@ -130,7 +157,7 @@ export function EditorProvider({ children }: { children: ReactNode }) {
         }
       }
     },
-    [cursorStore],
+    [cursorStore, cancelActiveStrokes],
   );
 
   const generateGeometry = useCallback(async () => {
@@ -144,7 +171,7 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     surfaceSelectAbortRef.current = null;
     const abortController = new AbortController();
     geometryAbortRef.current = abortController;
-    brushEngineRef.current.cancelStroke();
+    cancelActiveStrokes();
     dispatch({ type: 'GEOMETRY_START' });
 
     try {
@@ -169,7 +196,7 @@ export function EditorProvider({ children }: { children: ReactNode }) {
         geometryInFlightRef.current = false;
       }
     }
-  }, []);
+  }, [cancelActiveStrokes]);
 
   const cancelGeometry = useCallback(() => {
     geometryAbortRef.current?.abort();
@@ -177,9 +204,9 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     geometryInFlightRef.current = false;
     surfaceSelectAbortRef.current?.abort();
     surfaceSelectAbortRef.current = null;
-    brushEngineRef.current.cancelStroke();
+    cancelActiveStrokes();
     dispatch({ type: 'GEOMETRY_CANCEL' });
-  }, []);
+  }, [cancelActiveStrokes]);
 
   const generateAppearance = useCallback(async () => {
     const targetImage = activeImageRef.current;
@@ -223,75 +250,87 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     dispatch({ type: 'APPEARANCE_CANCEL' });
   }, []);
 
-  const selectSurfaceAtImagePoint = useCallback(async (imagePoint: Point2D) => {
-    const current = stateRef.current;
-    const targetImage = current.image;
-    const targetGeometry = current.geometry.data;
-    if (!targetImage || !targetGeometry || current.geometry.status !== 'ready') {
-      return;
-    }
-
-    surfaceSelectAbortRef.current?.abort();
-    const abortController = new AbortController();
-    surfaceSelectAbortRef.current = abortController;
-
-    brushEngineRef.current.cancelStroke();
-    dispatch({ type: 'PAINT_SELECT_SURFACE_START' });
-
-    try {
-      const outcome = await selectSurfaceForGeometry(
-        targetGeometry.metadata.id,
-        imagePoint,
-        abortController.signal,
-      );
-      if (
-        abortController.signal.aborted ||
-        activeImageRef.current?.id !== targetImage.id ||
-        stateRef.current.geometry.data?.metadata.id !== targetGeometry.metadata.id
-      ) {
+  const selectSurfaceAtImagePoint = useCallback(
+    async (imagePoint: Point2D) => {
+      const current = stateRef.current;
+      const targetImage = current.image;
+      const targetGeometry = current.geometry.data;
+      if (!targetImage || !targetGeometry || current.geometry.status !== 'ready') {
         return;
       }
 
-      if (outcome.ok) {
-        dispatch({ type: 'PAINT_SELECT_SURFACE', selection: outcome.selection });
-      } else {
-        dispatch({ type: 'PAINT_SELECT_SURFACE_ERROR', reason: outcome.reason });
-      }
-    } catch (error) {
-      if (error instanceof DOMException && error.name === 'AbortError') {
-        return;
-      }
-      if (
-        abortController.signal.aborted ||
-        activeImageRef.current?.id !== targetImage.id ||
-        stateRef.current.geometry.data?.metadata.id !== targetGeometry.metadata.id
-      ) {
-        return;
-      }
-      const reason =
-        error instanceof Error ? error.message : 'Failed to select planar surface on backend.';
-      dispatch({ type: 'PAINT_SELECT_SURFACE_ERROR', reason });
-    } finally {
-      if (surfaceSelectAbortRef.current === abortController) {
-        surfaceSelectAbortRef.current = null;
-      }
-    }
-  }, []);
+      surfaceSelectAbortRef.current?.abort();
+      const abortController = new AbortController();
+      surfaceSelectAbortRef.current = abortController;
 
-  const setActiveSurface = useCallback((surfaceId: string) => {
-    brushEngineRef.current.cancelStroke();
-    dispatch({ type: 'PAINT_SET_ACTIVE_SURFACE', surfaceId });
-  }, []);
+      cancelActiveStrokes();
+      dispatch({ type: 'PAINT_SELECT_SURFACE_START' });
 
-  const removeSurface = useCallback((surfaceId: string) => {
-    brushEngineRef.current.cancelStroke();
-    dispatch({ type: 'PAINT_REMOVE_SURFACE', surfaceId });
-  }, []);
+      try {
+        const outcome = await selectSurfaceForGeometry(
+          targetGeometry.metadata.id,
+          imagePoint,
+          abortController.signal,
+        );
+        if (
+          abortController.signal.aborted ||
+          activeImageRef.current?.id !== targetImage.id ||
+          stateRef.current.geometry.data?.metadata.id !== targetGeometry.metadata.id
+        ) {
+          return;
+        }
 
-  const reorderSurfaces = useCallback((fromIndex: number, toIndex: number) => {
-    brushEngineRef.current.cancelStroke();
-    dispatch({ type: 'PAINT_REORDER_SURFACES', fromIndex, toIndex });
-  }, []);
+        if (outcome.ok) {
+          dispatch({ type: 'PAINT_SELECT_SURFACE', selection: outcome.selection });
+        } else {
+          dispatch({ type: 'PAINT_SELECT_SURFACE_ERROR', reason: outcome.reason });
+        }
+      } catch (error) {
+        if (error instanceof DOMException && error.name === 'AbortError') {
+          return;
+        }
+        if (
+          abortController.signal.aborted ||
+          activeImageRef.current?.id !== targetImage.id ||
+          stateRef.current.geometry.data?.metadata.id !== targetGeometry.metadata.id
+        ) {
+          return;
+        }
+        const reason =
+          error instanceof Error ? error.message : 'Failed to select planar surface on backend.';
+        dispatch({ type: 'PAINT_SELECT_SURFACE_ERROR', reason });
+      } finally {
+        if (surfaceSelectAbortRef.current === abortController) {
+          surfaceSelectAbortRef.current = null;
+        }
+      }
+    },
+    [cancelActiveStrokes],
+  );
+
+  const setActiveSurface = useCallback(
+    (surfaceId: string) => {
+      cancelActiveStrokes();
+      dispatch({ type: 'PAINT_SET_ACTIVE_SURFACE', surfaceId });
+    },
+    [cancelActiveStrokes],
+  );
+
+  const removeSurface = useCallback(
+    (surfaceId: string) => {
+      cancelActiveStrokes();
+      dispatch({ type: 'PAINT_REMOVE_SURFACE', surfaceId });
+    },
+    [cancelActiveStrokes],
+  );
+
+  const reorderSurfaces = useCallback(
+    (fromIndex: number, toIndex: number) => {
+      cancelActiveStrokes();
+      dispatch({ type: 'PAINT_REORDER_SURFACES', fromIndex, toIndex });
+    },
+    [cancelActiveStrokes],
+  );
 
   const setFootprintExtent = useCallback((surfaceId: string, extentScale: number) => {
     dispatch({ type: 'PAINT_SET_FOOTPRINT_EXTENT', surfaceId, extentScale });
@@ -328,14 +367,193 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     dispatch({ type: 'PAINT_COMMIT_STROKES', strokes });
   }, []);
 
+  const commitAutoStroke = useCallback(
+    (payload: {
+      anchorMode: AutoAnchorMode;
+      newPlanarSurface?: PlanarDecalSurface | null;
+      planarStroke?: BrushStroke | null;
+      imageStroke?: ImageSpaceStroke | null;
+    }) => {
+      dispatch({ type: 'PAINT_COMMIT_AUTO_STROKE', ...payload });
+    },
+    [],
+  );
+
   const undoPaint = useCallback(() => {
-    brushEngineRef.current.cancelStroke();
-    dispatch({ type: 'PAINT_UNDO' });
-  }, []);
+    cancelActiveStrokes();
+    dispatch({
+      type: stateRef.current.workspaceMode === 'artwork' ? 'ARTWORK_UNDO' : 'PAINT_UNDO',
+    });
+  }, [cancelActiveStrokes]);
 
   const redoPaint = useCallback(() => {
-    brushEngineRef.current.cancelStroke();
-    dispatch({ type: 'PAINT_REDO' });
+    cancelActiveStrokes();
+    dispatch({
+      type: stateRef.current.workspaceMode === 'artwork' ? 'ARTWORK_REDO' : 'PAINT_REDO',
+    });
+  }, [cancelActiveStrokes]);
+
+  const createBlankArtwork = useCallback(
+    (width?: number, height?: number) => {
+      cancelActiveStrokes();
+      const seq = stateRef.current.paint.nextArtworkNumber;
+      const artwork = ArtworkModel.createBlank({
+        name: `Artwork ${seq}`,
+        width,
+        height,
+      });
+      dispatch({ type: 'ARTWORK_ADD', artwork, openCanvas: true });
+    },
+    [cancelActiveStrokes],
+  );
+
+  const openArtworkEditor = useCallback(
+    (artworkId?: string) => {
+      cancelActiveStrokes();
+      const targetId = artworkId ?? stateRef.current.paint.activeArtworkId;
+      if (targetId && PaintDocument.getArtworkById(stateRef.current.paint, targetId)) {
+        dispatch({ type: 'SET_WORKSPACE_MODE', mode: 'artwork', artworkId: targetId });
+        return;
+      }
+      createBlankArtwork();
+    },
+    [cancelActiveStrokes, createBlankArtwork],
+  );
+
+  const returnToPhoto = useCallback(() => {
+    cancelActiveStrokes();
+    dispatch({ type: 'SET_WORKSPACE_MODE', mode: 'photo' });
+  }, [cancelActiveStrokes]);
+
+  const importArtworkFile = useCallback(
+    async (file: File) => {
+      try {
+        const loaded = await loadImageFromFile(file);
+        importedArtImagesRef.current.add(loaded);
+        const artwork = ArtworkModel.createFromImage(loaded);
+        cancelActiveStrokes();
+        dispatch({
+          type: 'ARTWORK_ADD',
+          artwork,
+          openCanvas: stateRef.current.workspaceMode === 'artwork',
+        });
+      } catch (error) {
+        const message =
+          error instanceof ImageLoadError
+            ? error.message
+            : error instanceof Error
+              ? error.message
+              : 'Failed to import artwork image.';
+        dispatch({ type: 'IMPORT_ERROR', message });
+      }
+    },
+    [cancelActiveStrokes],
+  );
+
+  const resizeActiveArtwork = useCallback(
+    (width: number, height: number) => {
+      const active = PaintDocument.getActiveArtwork(stateRef.current.paint);
+      if (!active || active.kind !== 'drawn') {
+        return;
+      }
+      cancelActiveStrokes();
+      const next = ArtworkModel.resizeDrawn(active, width, height);
+      if (next !== active) {
+        dispatch({ type: 'ARTWORK_UPDATE', artwork: next });
+      }
+    },
+    [cancelActiveStrokes],
+  );
+
+  const commitArtworkStroke = useCallback((stroke: BrushStroke) => {
+    dispatch({ type: 'ARTWORK_COMMIT_STROKE', stroke });
+  }, []);
+
+  const clearActiveArtwork = useCallback(() => {
+    cancelActiveStrokes();
+    dispatch({ type: 'ARTWORK_CLEAR' });
+  }, [cancelActiveStrokes]);
+
+  const setActiveArtwork = useCallback(
+    (artworkId: string | null) => {
+      cancelActiveStrokes();
+      dispatch({ type: 'ARTWORK_SET_ACTIVE', artworkId });
+    },
+    [cancelActiveStrokes],
+  );
+
+  const removeArtwork = useCallback(
+    (artworkId: string) => {
+      const target = PaintDocument.getArtworkById(stateRef.current.paint, artworkId);
+      cancelActiveStrokes();
+      dispatch({ type: 'ARTWORK_REMOVE', artworkId });
+      if (target && target.kind === 'imported') {
+        target.image.dispose();
+        importedArtImagesRef.current.delete(target.image);
+      }
+    },
+    [cancelActiveStrokes],
+  );
+
+  const placeArtworkAtImagePoint = useCallback((artworkId: string, imagePoint?: Point2D) => {
+    const current = stateRef.current;
+    const image = current.image;
+    const artwork = PaintDocument.getArtworkById(current.paint, artworkId);
+    if (!image || !artwork) {
+      return;
+    }
+    const imageSize = { width: image.metadata.width, height: image.metadata.height };
+    const anchorPoint = imagePoint ?? {
+      x: imageSize.width * 0.5,
+      y: imageSize.height * 0.5,
+    };
+    const seq = current.paint.nextPlacementNumber;
+    const placement = createAutomaticArtworkPlacement({
+      artwork,
+      imagePoint: anchorPoint,
+      imageSize,
+      geometry: current.geometry.data,
+      label: `${artwork.name} #${seq}`,
+    });
+    dispatch({ type: 'PLACEMENT_ADD', placement });
+  }, []);
+
+  const updatePlacement = useCallback((placement: ArtworkPlacement, recordHistory = true) => {
+    dispatch({ type: 'PLACEMENT_UPDATE', placement, recordHistory });
+  }, []);
+
+  const setActivePlacement = useCallback((placementId: string | null) => {
+    dispatch({ type: 'PLACEMENT_SET_ACTIVE', placementId });
+  }, []);
+
+  const removePlacement = useCallback((placementId: string) => {
+    dispatch({ type: 'PLACEMENT_REMOVE', placementId });
+  }, []);
+
+  const reanchorPlacement = useCallback((placementId: string, imagePoint?: Point2D) => {
+    const current = stateRef.current;
+    const image = current.image;
+    const existing = current.paint.artworkPlacements.find((p) => p.id === placementId);
+    const artwork = existing
+      ? PaintDocument.getArtworkById(current.paint, existing.artworkId)
+      : null;
+    if (!image || !existing || !artwork) {
+      return;
+    }
+    const imageSize = { width: image.metadata.width, height: image.metadata.height };
+    const anchorPoint = imagePoint ??
+      estimatePlacementImageCenter(existing, imageSize, current.geometry.data) ?? {
+        x: imageSize.width * 0.5,
+        y: imageSize.height * 0.5,
+      };
+    const next = reanchorArtworkPlacement({
+      placement: existing,
+      artwork,
+      imagePoint: anchorPoint,
+      imageSize,
+      geometry: current.geometry.data,
+    });
+    dispatch({ type: 'PLACEMENT_UPDATE', placement: next, recordHistory: true });
   }, []);
 
   const exportPng = useCallback(async () => {
@@ -344,10 +562,10 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     const geometry = current.geometry.data;
     const renderer = paintRendererRef.current;
 
-    if (!image || !geometry || !renderer) {
+    if (!image || !renderer) {
       dispatch({
         type: 'PAINT_EXPORT_DONE',
-        error: 'Load an image and generate geometry before exporting.',
+        error: 'Load an image before exporting.',
       });
       return;
     }
@@ -435,29 +653,39 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     dispatch({ type: 'ZOOM_STEP', direction: 'out' });
   }, []);
 
-  const setActiveTool = useCallback((tool: EditorTool) => {
-    if (tool !== 'brush' && tool !== 'eraser') {
-      brushEngineRef.current.cancelStroke();
-    }
-    dispatch({ type: 'SET_ACTIVE_TOOL', tool });
-  }, []);
+  const setActiveTool = useCallback(
+    (tool: EditorTool) => {
+      if (tool !== 'brush' && tool !== 'eraser') {
+        cancelActiveStrokes();
+      }
+      dispatch({ type: 'SET_ACTIVE_TOOL', tool });
+    },
+    [cancelActiveStrokes],
+  );
 
-  const setViewMode = useCallback((mode: ViewMode) => {
-    if (mode !== 'rgb') {
-      brushEngineRef.current.cancelStroke();
-    }
-    dispatch({ type: 'SET_VIEW_MODE', mode });
-  }, []);
+  const setViewMode = useCallback(
+    (mode: ViewMode) => {
+      if (mode !== 'rgb') {
+        cancelActiveStrokes();
+      }
+      dispatch({ type: 'SET_VIEW_MODE', mode });
+    },
+    [cancelActiveStrokes],
+  );
 
   const value = useMemo<EditorContextValue>(
     () => ({
       state,
       cursorStore,
       fileInputRef,
+      artworkFileInputRef,
       brushEngineRef,
+      imageBrushEngineRef,
       paintRendererRef,
       openFilePicker,
+      openArtworkFilePicker,
       importFile,
+      importArtworkFile,
       clearError,
       setViewportSize,
       setTransform,
@@ -467,6 +695,19 @@ export function EditorProvider({ children }: { children: ReactNode }) {
       zoomOut,
       setActiveTool,
       setViewMode,
+      openArtworkEditor,
+      createBlankArtwork,
+      returnToPhoto,
+      resizeActiveArtwork,
+      commitArtworkStroke,
+      clearActiveArtwork,
+      setActiveArtwork,
+      removeArtwork,
+      placeArtworkAtImagePoint,
+      updatePlacement,
+      setActivePlacement,
+      removePlacement,
+      reanchorPlacement,
       generateGeometry,
       cancelGeometry,
       generateAppearance,
@@ -482,6 +723,7 @@ export function EditorProvider({ children }: { children: ReactNode }) {
       setPaintOverlayOptions,
       commitBrushStroke,
       commitBrushStrokeBatch,
+      commitAutoStroke,
       undoPaint,
       redoPaint,
       exportPng,
@@ -490,7 +732,9 @@ export function EditorProvider({ children }: { children: ReactNode }) {
       state,
       cursorStore,
       openFilePicker,
+      openArtworkFilePicker,
       importFile,
+      importArtworkFile,
       clearError,
       setViewportSize,
       setTransform,
@@ -500,6 +744,19 @@ export function EditorProvider({ children }: { children: ReactNode }) {
       zoomOut,
       setActiveTool,
       setViewMode,
+      openArtworkEditor,
+      createBlankArtwork,
+      returnToPhoto,
+      resizeActiveArtwork,
+      commitArtworkStroke,
+      clearActiveArtwork,
+      setActiveArtwork,
+      removeArtwork,
+      placeArtworkAtImagePoint,
+      updatePlacement,
+      setActivePlacement,
+      removePlacement,
+      reanchorPlacement,
       generateGeometry,
       cancelGeometry,
       generateAppearance,
@@ -515,6 +772,7 @@ export function EditorProvider({ children }: { children: ReactNode }) {
       setPaintOverlayOptions,
       commitBrushStroke,
       commitBrushStrokeBatch,
+      commitAutoStroke,
       undoPaint,
       redoPaint,
       exportPng,

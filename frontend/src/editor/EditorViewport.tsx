@@ -1,17 +1,29 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { EmptyViewportState } from '../components/EmptyViewportState';
 import { ErrorBanner } from '../components/ErrorBanner';
+import { classifyAndAnchorSurface } from '../geometry/autoSurfaceAnchor';
 import { parseNormalizedIntrinsics } from '../geometry/geometryAccess';
 import { useDevicePixelRatio } from '../hooks/useDevicePixelRatio';
 import { useEditor } from '../hooks/useEditor';
 import { useElementSize } from '../hooks/useElementSize';
-import { PaintDocument } from '../painting/paintDocument';
-import { getEffectiveFootprint } from '../painting/planarDecal';
-import { findSurfaceOwnerAtImagePoint } from '../painting/planeVisibility';
+import { ARTWORK_DRAG_MIME } from '../painting/artwork';
+import {
+  type ArtworkPlacement,
+  hitTestPlacements,
+  maybeExtendCurvedMappingOnCompletedTransform,
+  movePlacementByImagePoints,
+  rotatePlacementFromImagePoint,
+  scalePlacementFromImagePoint,
+} from '../painting/artworkPlacement';
+import { getEffectiveFootprint, type PlanarDecalSurface } from '../painting/planarDecal';
 import { PlanarPaintRenderer } from '../painting/planarPaintRenderer';
 import type { Point2D, Size2D, ViewportTransform } from '../types/editor';
 import { PointCloudViewer } from './PointCloudViewer';
-import { buildBrushCursorPreview, renderViewportCanvas } from './canvasRenderer';
+import {
+  buildBrushCursorPreview,
+  buildPlacementGizmoOverlay,
+  renderViewportCanvas,
+} from './canvasRenderer';
 import {
   clampPanToViewport,
   clientToImage,
@@ -41,10 +53,38 @@ interface PanSession {
   lastClientY: number;
 }
 
+type ActivePaintAnchor =
+  | {
+      mode: 'planar';
+      surface: PlanarDecalSurface;
+      reusedExisting: boolean;
+      surfaceRadius: number;
+    }
+  | {
+      mode: 'curved';
+      componentMask: Uint8Array;
+      surfaceRadius: number;
+    }
+  | {
+      mode: 'fallback-2d';
+      radiusPx: number;
+    };
+
 interface PaintSession {
   active: boolean;
   pointerId: number | null;
-  surfaceId: string | null;
+  anchor: ActivePaintAnchor | null;
+  lastImagePoint: Point2D | null;
+}
+
+type PlacementDragMode = 'move' | 'scale' | 'rotate';
+
+interface PlacementDragSession {
+  active: boolean;
+  mode: PlacementDragMode;
+  pointerId: number | null;
+  initialPlacement: ArtworkPlacement | null;
+  previewPlacement: ArtworkPlacement | null;
   lastImagePoint: Point2D | null;
 }
 
@@ -57,12 +97,16 @@ export function EditorViewport({
     state,
     cursorStore,
     brushEngineRef,
+    imageBrushEngineRef,
     paintRendererRef,
     setViewportSize,
     setTransform,
     setViewMode,
     selectSurfaceAtImagePoint,
-    commitBrushStrokeBatch,
+    commitAutoStroke,
+    placeArtworkAtImagePoint,
+    setActivePlacement,
+    updatePlacement,
   } = useEditor();
   const dpr = useDevicePixelRatio();
 
@@ -86,7 +130,15 @@ export function EditorViewport({
   const paintSessionRef = useRef<PaintSession>({
     active: false,
     pointerId: null,
-    surfaceId: null,
+    anchor: null,
+    lastImagePoint: null,
+  });
+  const placementDragRef = useRef<PlacementDragSession>({
+    active: false,
+    mode: 'move',
+    pointerId: null,
+    initialPlacement: null,
+    previewPlacement: null,
     lastImagePoint: null,
   });
 
@@ -141,10 +193,17 @@ export function EditorViewport({
     }
 
     const paintRenderer = paintRendererRef.current;
-    const usePaintWebGl =
-      viewMode === 'rgb' && image !== null && geometry !== null && paintRenderer !== null;
+    const usePaintWebGl = viewMode === 'rgb' && image !== null && paintRenderer !== null;
+    const activeAnchor = paintSessionRef.current.active ? paintSessionRef.current.anchor : null;
+    const previewSurfaces =
+      activeAnchor && activeAnchor.mode === 'planar' && !activeAnchor.reusedExisting
+        ? [activeAnchor.surface]
+        : undefined;
+    const livePreviewPlacement = placementDragRef.current.active
+      ? placementDragRef.current.previewPlacement
+      : null;
 
-    if (viewMode === 'rgb' && image !== null && geometry !== null && paintRenderer !== null) {
+    if (viewMode === 'rgb' && image !== null && paintRenderer !== null) {
       paintRenderer.renderViewport({
         viewportSize,
         dpr: currentDpr,
@@ -155,8 +214,30 @@ export function EditorViewport({
         paintDoc: paint,
         pendingStrokes: brushEngineRef.current.getPreviewStrokes(),
         activeStroke: brushEngineRef.current.getActiveStroke(),
+        previewSurfaces,
+        activeImagePreview: imageBrushEngineRef.current.getActivePreview(),
+        previewPlacement: livePreviewPlacement,
       });
     }
+
+    const activePlacement = livePreviewPlacement
+      ? livePreviewPlacement
+      : paint.activePlacementId
+        ? (paint.artworkPlacements.find((p) => p.id === paint.activePlacementId) ?? null)
+        : null;
+    const placementGizmo =
+      image &&
+      viewMode === 'rgb' &&
+      activeTool === 'pointer' &&
+      !paint.cleanPreview &&
+      activePlacement
+        ? buildPlacementGizmoOverlay({
+            placement: activePlacement,
+            imageSize: { width: image.metadata.width, height: image.metadata.height },
+            transform: liveTransformRef.current,
+            geometry,
+          })
+        : null;
 
     const brushCursor =
       image &&
@@ -171,6 +252,14 @@ export function EditorViewport({
             transform: liveTransformRef.current,
             geometry,
             paintDoc: paint,
+            activeAnchorMode: activeAnchor?.mode ?? null,
+            activePlanarSurface: activeAnchor?.mode === 'planar' ? activeAnchor.surface : null,
+            activeSurfaceRadius:
+              activeAnchor && activeAnchor.mode !== 'fallback-2d'
+                ? activeAnchor.surfaceRadius
+                : null,
+            activeComponentMask:
+              activeAnchor?.mode === 'curved' ? activeAnchor.componentMask : null,
           })
         : null;
 
@@ -184,8 +273,9 @@ export function EditorViewport({
       appearance,
       borderOnly: usePaintWebGl,
       brushCursor,
+      placementGizmo,
     });
-  }, [brushEngineRef, isSpacePressed, paintRendererRef]);
+  }, [brushEngineRef, imageBrushEngineRef, isSpacePressed, paintRendererRef]);
 
   useEffect(() => {
     const host = paintHostRef.current;
@@ -361,10 +451,11 @@ export function EditorViewport({
     if (isMiddleClick || isLeftPanClick) {
       if (paintSessionRef.current.active) {
         brushEngineRef.current.cancelStroke();
+        imageBrushEngineRef.current.cancelStroke();
         paintSessionRef.current = {
           active: false,
           pointerId: null,
-          surfaceId: null,
+          anchor: null,
           lastImagePoint: null,
         };
         scheduleCanvasRender();
@@ -382,29 +473,121 @@ export function EditorViewport({
       return;
     }
 
-    if (
-      event.button !== 0 ||
-      state.viewMode === 'pointcloud' ||
-      state.viewMode === 'mesh' ||
-      !state.geometry.data
-    ) {
+    if (event.button !== 0 || state.viewMode === 'pointcloud' || state.viewMode === 'mesh') {
       return;
     }
 
     const rect = event.currentTarget.getBoundingClientRect();
-    cursorViewportPointRef.current = {
+    const viewportPoint = {
       x: event.clientX - rect.left,
       y: event.clientY - rect.top,
     };
+    cursorViewportPointRef.current = viewportPoint;
     const imagePoint = clientToImage(
       { x: event.clientX, y: event.clientY },
       rect,
       liveTransformRef.current,
     );
 
+    if (state.activeTool === 'pointer' && state.viewMode === 'rgb') {
+      const imageSize = {
+        width: state.image.metadata.width,
+        height: state.image.metadata.height,
+      };
+      const activePlacement = state.paint.activePlacementId
+        ? (state.paint.artworkPlacements.find((p) => p.id === state.paint.activePlacementId) ??
+          null)
+        : null;
+
+      if (activePlacement && !state.paint.cleanPreview) {
+        const gizmo = buildPlacementGizmoOverlay({
+          placement: activePlacement,
+          imageSize,
+          transform: liveTransformRef.current,
+          geometry: state.geometry.data,
+        });
+        if (gizmo) {
+          let dragMode: PlacementDragMode | null = null;
+          if (
+            Math.hypot(
+              viewportPoint.x - gizmo.rotationHandle.x,
+              viewportPoint.y - gizmo.rotationHandle.y,
+            ) <= 13
+          ) {
+            dragMode = 'rotate';
+          } else {
+            for (let i = 0; i < gizmo.corners.length; i++) {
+              const corner = gizmo.corners[i];
+              if (
+                corner &&
+                Math.hypot(viewportPoint.x - corner.x, viewportPoint.y - corner.y) <= 11
+              ) {
+                dragMode = 'scale';
+                break;
+              }
+            }
+          }
+          if (!dragMode) {
+            const directHit = hitTestPlacements(
+              [activePlacement],
+              imagePoint,
+              imageSize,
+              state.geometry.data,
+            );
+            if (directHit) {
+              dragMode = 'move';
+            }
+          }
+          if (dragMode) {
+            event.preventDefault();
+            event.currentTarget.setPointerCapture(event.pointerId);
+            placementDragRef.current = {
+              active: true,
+              mode: dragMode,
+              pointerId: event.pointerId,
+              initialPlacement: activePlacement,
+              previewPlacement: activePlacement,
+              lastImagePoint: imagePoint,
+            };
+            scheduleCanvasRender();
+            return;
+          }
+        }
+      }
+
+      const picked = hitTestPlacements(
+        state.paint.artworkPlacements,
+        imagePoint,
+        imageSize,
+        state.geometry.data,
+      );
+      if (picked) {
+        setActivePlacement(picked.id);
+        event.preventDefault();
+        event.currentTarget.setPointerCapture(event.pointerId);
+        placementDragRef.current = {
+          active: true,
+          mode: 'move',
+          pointerId: event.pointerId,
+          initialPlacement: picked,
+          previewPlacement: picked,
+          lastImagePoint: imagePoint,
+        };
+        scheduleCanvasRender();
+        return;
+      }
+
+      if (state.paint.activePlacementId !== null) {
+        setActivePlacement(null);
+      }
+      return;
+    }
+
     if (state.activeTool === 'select-surface') {
-      event.preventDefault();
-      void selectSurfaceAtImagePoint(imagePoint);
+      if (state.geometry.data) {
+        event.preventDefault();
+        void selectSurfaceAtImagePoint(imagePoint);
+      }
       return;
     }
 
@@ -416,34 +599,93 @@ export function EditorViewport({
         width: state.image.metadata.width,
         height: state.image.metadata.height,
       };
-      const ownerSurface = findSurfaceOwnerAtImagePoint(
-        state.paint.surfaces,
+      const strokeMode = state.activeTool === 'eraser' ? 'erase' : 'paint';
+      const anchorResult = classifyAndAnchorSurface({
+        geometry: state.geometry.data,
         imagePoint,
         imageSize,
-        state.geometry.data,
-      );
-      const targetSurface = ownerSurface ?? PaintDocument.getActiveSurface(state.paint);
-      if (!targetSurface) {
-        return;
+        brushPixelDiameter: state.paint.brushConfig.pixelSize,
+        existingSurfaces: state.paint.surfaces,
+        nextSurfaceNumber: state.paint.nextSurfaceNumber,
+      });
+
+      const brushConfig = state.paint.brushConfig;
+      let activeAnchor: ActivePaintAnchor | null = null;
+      let started = false;
+
+      if (anchorResult.mode === 'planar' && state.geometry.data) {
+        const intr = parseNormalizedIntrinsics(state.geometry.data.metadata.intrinsics);
+        const planeHit = anchorResult.surface.frame.imagePointToPlane(imagePoint, imageSize, intr);
+        if (planeHit) {
+          const footprint = getEffectiveFootprint(anchorResult.surface);
+          const startedStroke = brushEngineRef.current.beginStroke(
+            anchorResult.surface.id,
+            footprint,
+            {
+              diameter: anchorResult.surfaceRadius * 2,
+              color: brushConfig.color,
+              opacity: brushConfig.opacity,
+              hardness: brushConfig.hardness,
+            },
+            { u: planeHit.u, v: planeHit.v },
+            strokeMode,
+          );
+          started = startedStroke !== null;
+          if (started) {
+            activeAnchor = {
+              mode: 'planar',
+              surface: anchorResult.surface,
+              reusedExisting: anchorResult.reusedExisting,
+              surfaceRadius: anchorResult.surfaceRadius,
+            };
+          }
+        }
+      } else if (anchorResult.mode === 'curved' && state.geometry.data) {
+        started = imageBrushEngineRef.current.beginCurvedStroke({
+          imagePoint,
+          imageSize,
+          geometry: state.geometry.data,
+          componentMask: anchorResult.componentMask,
+          surfaceRadius: anchorResult.surfaceRadius,
+          brush: {
+            diameter: brushConfig.pixelSize,
+            color: brushConfig.color,
+            opacity: brushConfig.opacity,
+            hardness: brushConfig.hardness,
+          },
+          mode: strokeMode,
+        });
+        if (started) {
+          activeAnchor = {
+            mode: 'curved',
+            componentMask: anchorResult.componentMask,
+            surfaceRadius: anchorResult.surfaceRadius,
+          };
+        }
+      } else {
+        const radiusPx =
+          anchorResult.mode === 'fallback-2d' ? anchorResult.radiusPx : brushConfig.pixelSize * 0.5;
+        started = imageBrushEngineRef.current.beginFallback2dStroke({
+          imagePoint,
+          imageSize,
+          pixelDiameter: radiusPx * 2,
+          brush: {
+            diameter: brushConfig.pixelSize,
+            color: brushConfig.color,
+            opacity: brushConfig.opacity,
+            hardness: brushConfig.hardness,
+          },
+          mode: strokeMode,
+        });
+        if (started) {
+          activeAnchor = {
+            mode: 'fallback-2d',
+            radiusPx,
+          };
+        }
       }
 
-      const intr = parseNormalizedIntrinsics(state.geometry.data.metadata.intrinsics);
-      const hit = targetSurface.frame.imagePointToPlane(imagePoint, imageSize, intr);
-      if (!hit) {
-        return;
-      }
-
-      const brush = PaintDocument.getEffectiveBrushSettingsForSurface(state.paint, targetSurface);
-      const footprint = getEffectiveFootprint(targetSurface);
-      const strokeMode = state.activeTool === 'eraser' ? 'erase' : 'paint';
-      const started = brushEngineRef.current.beginStroke(
-        targetSurface.id,
-        footprint,
-        brush,
-        { u: hit.u, v: hit.v },
-        strokeMode,
-      );
-      if (!started) {
+      if (!started || !activeAnchor) {
         return;
       }
 
@@ -452,7 +694,7 @@ export function EditorViewport({
       paintSessionRef.current = {
         active: true,
         pointerId: event.pointerId,
-        surfaceId: targetSurface.id,
+        anchor: activeAnchor,
         lastImagePoint: imagePoint,
       };
       scheduleCanvasRender();
@@ -495,10 +737,11 @@ export function EditorViewport({
       return;
     }
 
-    const paintSession = paintSessionRef.current;
-    if (paintSession.active && paintSession.pointerId === event.pointerId) {
-      const { image, geometry, paint } = latestRenderStateRef.current;
-      if (image && geometry && paint.surfaces.length > 0) {
+    const placementDrag = placementDragRef.current;
+    if (placementDrag.active && placementDrag.pointerId === event.pointerId) {
+      const { image, geometry } = latestRenderStateRef.current;
+      const basePlacement = placementDrag.previewPlacement ?? placementDrag.initialPlacement;
+      if (image && basePlacement) {
         const imageSize = {
           width: image.metadata.width,
           height: image.metadata.height,
@@ -508,69 +751,62 @@ export function EditorViewport({
           rect,
           liveTransformRef.current,
         );
-        const intr = parseNormalizedIntrinsics(geometry.metadata.intrinsics);
-        const ownerSurface = findSurfaceOwnerAtImagePoint(
-          paint.surfaces,
-          imagePoint,
-          imageSize,
-          geometry,
+        const prevPt = placementDrag.lastImagePoint ?? imagePoint;
+        let nextPlacement = basePlacement;
+        if (placementDrag.mode === 'move') {
+          nextPlacement = movePlacementByImagePoints(
+            basePlacement,
+            prevPt,
+            imagePoint,
+            imageSize,
+            geometry,
+          );
+        } else if (placementDrag.mode === 'scale') {
+          nextPlacement = scalePlacementFromImagePoint(
+            basePlacement,
+            imagePoint,
+            imageSize,
+            geometry,
+          );
+        } else {
+          nextPlacement = rotatePlacementFromImagePoint(
+            basePlacement,
+            imagePoint,
+            imageSize,
+            geometry,
+          );
+        }
+        placementDrag.previewPlacement = nextPlacement;
+        placementDrag.lastImagePoint = imagePoint;
+        scheduleCanvasRender();
+      }
+      updateCursorSample(event.clientX, event.clientY);
+      return;
+    }
+
+    const paintSession = paintSessionRef.current;
+    if (paintSession.active && paintSession.pointerId === event.pointerId) {
+      const { image, geometry } = latestRenderStateRef.current;
+      const anchor = paintSession.anchor;
+      if (image && anchor) {
+        const imageSize = {
+          width: image.metadata.width,
+          height: image.metadata.height,
+        };
+        const imagePoint = clientToImage(
+          { x: event.clientX, y: event.clientY },
+          rect,
+          liveTransformRef.current,
         );
-        const prevSurface = paintSession.surfaceId
-          ? (paint.surfaces.find((s) => s.id === paintSession.surfaceId) ?? null)
-          : null;
 
-        if (ownerSurface && ownerSurface.id !== paintSession.surfaceId) {
-          // Refine seam crossing along the pointer segment so cross-surface strokes connect cleanly.
-          const prevImg = paintSession.lastImagePoint ?? imagePoint;
-          let loImg = prevImg;
-          let hiImg = imagePoint;
-          for (let step = 0; step < 6; step++) {
-            const midImg = { x: 0.5 * (loImg.x + hiImg.x), y: 0.5 * (loImg.y + hiImg.y) };
-            const midOwner = findSurfaceOwnerAtImagePoint(
-              paint.surfaces,
-              midImg,
-              imageSize,
-              geometry,
-            );
-            if (midOwner?.id === ownerSurface.id) {
-              hiImg = midImg;
-            } else {
-              loImg = midImg;
-            }
-          }
-
-          const prevEndHit = prevSurface
-            ? prevSurface.frame.imagePointToPlane(loImg, imageSize, intr)
-            : null;
-          const nextStartHit = ownerSurface.frame.imagePointToPlane(hiImg, imageSize, intr);
-          const nextCurrHit = ownerSurface.frame.imagePointToPlane(imagePoint, imageSize, intr);
-          const nextStart = nextStartHit ?? nextCurrHit;
-
-          if (nextStart) {
-            const nextBrush = PaintDocument.getEffectiveBrushSettingsForSurface(
-              paint,
-              ownerSurface,
-            );
-            const nextFootprint = getEffectiveFootprint(ownerSurface);
-            const switched = brushEngineRef.current.switchSurfaceStroke(
-              ownerSurface.id,
-              nextFootprint,
-              nextBrush,
-              { u: nextStart.u, v: nextStart.v },
-              prevEndHit ? { u: prevEndHit.u, v: prevEndHit.v } : null,
-            );
-            if (switched) {
-              if (nextCurrHit && nextCurrHit !== nextStart) {
-                brushEngineRef.current.extendStroke({ u: nextCurrHit.u, v: nextCurrHit.v }, true);
-              }
-              paintSession.surfaceId = ownerSurface.id;
-            }
-          }
-        } else if (prevSurface) {
-          const hit = prevSurface.frame.imagePointToPlane(imagePoint, imageSize, intr);
+        if (anchor.mode === 'planar' && geometry) {
+          const intr = parseNormalizedIntrinsics(geometry.metadata.intrinsics);
+          const hit = anchor.surface.frame.imagePointToPlane(imagePoint, imageSize, intr);
           if (hit) {
             brushEngineRef.current.extendStroke({ u: hit.u, v: hit.v });
           }
+        } else if (anchor.mode === 'curved' || anchor.mode === 'fallback-2d') {
+          imageBrushEngineRef.current.extendStroke(imagePoint);
         }
 
         paintSession.lastImagePoint = imagePoint;
@@ -601,24 +837,71 @@ export function EditorViewport({
       setIsPanning(false);
     }
 
+    const placementDrag = placementDragRef.current;
+    if (placementDrag.active && placementDrag.pointerId === event.pointerId) {
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+      const { initialPlacement, previewPlacement, mode: dragMode } = placementDrag;
+      placementDragRef.current = {
+        active: false,
+        mode: 'move',
+        pointerId: null,
+        initialPlacement: null,
+        previewPlacement: null,
+        lastImagePoint: null,
+      };
+      if (!cancelled && previewPlacement && previewPlacement !== initialPlacement) {
+        const { image, geometry } = latestRenderStateRef.current;
+        const finalPlacement =
+          image && (dragMode === 'move' || dragMode === 'scale')
+            ? maybeExtendCurvedMappingOnCompletedTransform(
+                previewPlacement,
+                { width: image.metadata.width, height: image.metadata.height },
+                geometry,
+              )
+            : previewPlacement;
+        updatePlacement(finalPlacement, true);
+      } else {
+        scheduleCanvasRender();
+      }
+    }
+
     const paintSession = paintSessionRef.current;
     if (paintSession.active && paintSession.pointerId === event.pointerId) {
       if (event.currentTarget.hasPointerCapture(event.pointerId)) {
         event.currentTarget.releasePointerCapture(event.pointerId);
       }
+      const finishedAnchor = paintSession.anchor;
       paintSessionRef.current = {
         active: false,
         pointerId: null,
-        surfaceId: null,
+        anchor: null,
         lastImagePoint: null,
       };
-      if (cancelled) {
+      if (cancelled || !finishedAnchor) {
         brushEngineRef.current.cancelStroke();
+        imageBrushEngineRef.current.cancelStroke();
         scheduleCanvasRender();
-      } else {
+      } else if (finishedAnchor.mode === 'planar') {
         const batch = brushEngineRef.current.commitBatch();
-        if (batch.length > 0) {
-          commitBrushStrokeBatch(batch);
+        const planarStroke = batch[0] ?? null;
+        if (planarStroke) {
+          commitAutoStroke({
+            anchorMode: 'planar',
+            newPlanarSurface: finishedAnchor.reusedExisting ? null : finishedAnchor.surface,
+            planarStroke,
+          });
+        } else {
+          scheduleCanvasRender();
+        }
+      } else {
+        const imageStroke = imageBrushEngineRef.current.commitStroke();
+        if (imageStroke) {
+          commitAutoStroke({
+            anchorMode: finishedAnchor.mode,
+            imageStroke,
+          });
         } else {
           scheduleCanvasRender();
         }
@@ -644,11 +927,7 @@ export function EditorViewport({
 
   const isPointCloudMode =
     (state.viewMode === 'pointcloud' || state.viewMode === 'mesh') && state.geometry.data !== null;
-  const isPaintWebGlVisible =
-    !isPointCloudMode &&
-    state.viewMode === 'rgb' &&
-    state.image !== null &&
-    state.geometry.data !== null;
+  const isPaintWebGlVisible = !isPointCloudMode && state.viewMode === 'rgb' && state.image !== null;
 
   const cursorModeClass =
     !state.image || isPointCloudMode
@@ -658,19 +937,50 @@ export function EditorViewport({
         : isSpacePressed || state.activeTool === 'hand'
           ? 'cursor-grab'
           : (state.activeTool === 'brush' || state.activeTool === 'eraser') &&
-              state.viewMode === 'rgb' &&
-              state.paint.surfaces.length > 0
+              state.viewMode === 'rgb'
             ? 'cursor-brush'
             : state.activeTool === 'select-surface'
               ? 'cursor-crosshair'
               : 'cursor-default';
+
+  const handleMainDragOver = (event: React.DragEvent<HTMLElement>) => {
+    if (state.image && Array.from(event.dataTransfer.types).includes(ARTWORK_DRAG_MIME)) {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'copy';
+      return;
+    }
+    dropZoneProps.onDragOver(event);
+  };
+
+  const handleMainDrop = (event: React.DragEvent<HTMLElement>) => {
+    if (Array.from(event.dataTransfer.types).includes(ARTWORK_DRAG_MIME)) {
+      event.preventDefault();
+      event.stopPropagation();
+      const artworkId = event.dataTransfer.getData(ARTWORK_DRAG_MIME);
+      const canvas = canvasRef.current;
+      if (artworkId && canvas && state.image) {
+        const rect = canvas.getBoundingClientRect();
+        const imagePoint = clientToImage(
+          { x: event.clientX, y: event.clientY },
+          rect,
+          liveTransformRef.current,
+        );
+        placeArtworkAtImagePoint(artworkId, imagePoint);
+      }
+      return;
+    }
+    dropZoneProps.onDrop(event);
+  };
 
   return (
     <main
       ref={containerRef}
       className={`editor-viewport ${cursorModeClass}`}
       aria-label="Image editor viewport"
-      {...dropZoneProps}
+      onDragEnter={dropZoneProps.onDragEnter}
+      onDragOver={handleMainDragOver}
+      onDragLeave={dropZoneProps.onDragLeave}
+      onDrop={handleMainDrop}
     >
       <div
         ref={paintHostRef}
