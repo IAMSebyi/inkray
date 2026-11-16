@@ -2,7 +2,6 @@
 name = "inkray-backend"
 version = "0.1.0"
 description = "Python/FastAPI geometry and intrinsic appearance inference service for Inkray"
-readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 dependencies = [

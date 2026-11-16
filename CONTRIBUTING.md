@@ -14,7 +14,7 @@ Contributions to **Inkray** are welcome - whether through **issues** (bug report
    git clone https://github.com/<your-username>/inkray.git
    cd inkray
    ```
-2. Set up the backend environment (`conda` or `venv`, see [backend/README.md](backend/README.md)) and frontend dependencies (`cd frontend && npm install`).
+2. Set up the backend environment (`conda` or `venv`, see [README.md](README.md)) and frontend dependencies (`cd frontend && npm install`).
 3. Make focused, clean changes matching existing conventions:
    - **Backend (Python):** Keep modules cleanly separated (geometry, appearance, inference, cache, API), prefer explicit type annotations, and avoid unnecessary complexity or fallback layers.
    - **Frontend (TypeScript / React / WebGL2):** Follow strict TypeScript and ESLint rules and keep code formatted with Prettier.
