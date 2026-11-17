@@ -1,0 +1,24 @@
+README.md
+  s_119201437525a3::t_f3a5ef73e5ff1c 153-154,186,300-301
+  s_119201437525a3::t_0c2c6eefab269b 7-8,18-19,173-182
+  s_119201437525a3::t_1665c222bfab5e 75-76,124-127
+  s_119201437525a3::t_283657ed4228d4 184
+  s_119201437525a3::t_899417305bc8e8 128-129
+  s_119201437525a3::t_caa3856b7aae96 183
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c0ead9cf4da2fad77a7c4cf67549f2105c2cc710",
+  "prompts": {},
+  "sessions": {
+    "s_119201437525a3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1e8d0-6990-7a72-a8a9-58422ba31978",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Iorga Sebastian George <sebyiorga95@yahoo.com>"
+    }
+  }
+}
