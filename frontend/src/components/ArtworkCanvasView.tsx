@@ -1,7 +1,7 @@
 import { ArrowLeft, Eraser, FolderOpen, Paintbrush, Plus, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { getCheckerboardTileCanvas, syncCanvasBackingSize } from '../editor/canvasRenderer';
-import { clamp, computeFitTransform } from '../editor/viewportTransforms';
+import { computeFitTransform } from '../editor/viewportTransforms';
 import { useDevicePixelRatio } from '../hooks/useDevicePixelRatio';
 import { useEditor } from '../hooks/useEditor';
 import { useElementSize } from '../hooks/useElementSize';
@@ -238,8 +238,8 @@ export function ArtworkCanvasView() {
     const artX = (sx - displayTransform.panX) / Math.max(1e-6, displayTransform.zoom);
     const artY = (sy - displayTransform.panY) / Math.max(1e-6, displayTransform.zoom);
     return {
-      x: clamp(artX, 0, activeArtwork.width),
-      y: clamp(artY, 0, activeArtwork.height),
+      x: artX,
+      y: artY,
     };
   };
 
@@ -253,7 +253,13 @@ export function ArtworkCanvasView() {
       return;
     }
     const pt = stagePointToArtworkPixel(event.clientX, event.clientY);
-    if (!pt) {
+    if (
+      !pt ||
+      pt.x < 0 ||
+      pt.y < 0 ||
+      pt.x >= activeArtwork.width ||
+      pt.y >= activeArtwork.height
+    ) {
       return;
     }
     const footprint = getArtworkFootprint(activeArtwork.width, activeArtwork.height);

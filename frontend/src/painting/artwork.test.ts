@@ -135,3 +135,20 @@ describe('Artwork & independent 2D asset model', () => {
     expect(filtB / filtA).toBeCloseTo(0.0, 5);
   });
 });
+
+it('undoes resizing without removing the previous stroke', () => {
+  let artwork = ArtworkModel.createBlank({ width: 64, height: 48 });
+  const stroke = {
+    id: 'paint',
+    surfaceId: artwork.id,
+    points: [{ u: 32, v: 24 }],
+    brush: { diameter: 8, color: '#ff0000', opacity: 1, hardness: 1 },
+  };
+  artwork = ArtworkModel.commitDrawnStroke(artwork, stroke);
+  artwork = ArtworkModel.resizeDrawn(artwork, 16, 16);
+  artwork = ArtworkModel.undoDrawn(artwork);
+  expect([artwork.width, artwork.height]).toEqual([64, 48]);
+  expect(artwork.strokes).toEqual([stroke]);
+  artwork = ArtworkModel.redoDrawn(artwork);
+  expect([artwork.width, artwork.height]).toEqual([16, 16]);
+});

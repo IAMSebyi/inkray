@@ -7,6 +7,9 @@ export const SUPPORTED_IMAGE_MIME_TYPES: readonly SupportedImageMimeType[] = [
 
 export const SUPPORTED_IMAGE_EXTENSIONS: readonly string[] = ['.jpg', '.jpeg', '.png'];
 
+export const MAX_IMAGE_FILE_BYTES = 32 * 1024 * 1024;
+export const MAX_IMAGE_PIXELS = 64_000_000;
+
 export const IMAGE_FILE_ACCEPT = 'image/jpeg,image/png,.jpg,.jpeg,.png';
 
 export type FileValidationResult =
@@ -40,6 +43,10 @@ export function validateImageFile(
       valid: false,
       error: `"${file.name}" is empty and cannot be loaded.`,
     };
+  }
+
+  if (file.size > MAX_IMAGE_FILE_BYTES) {
+    return { valid: false, error: 'Image files must be no larger than 32 MiB.' };
   }
 
   const normalizedMime = file.type.trim().toLowerCase();

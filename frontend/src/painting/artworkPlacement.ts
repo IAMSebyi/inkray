@@ -24,7 +24,8 @@ import {
 } from '../geometry/autoSurfaceAnchor';
 import { PlaneFrame } from '../geometry/planeFrame';
 import { getSurfaceGridIndex, pickSurfaceHit } from '../geometry/surfacePicking';
-import type { Artwork } from './artwork';
+import { type Artwork, rasterizeArtworkRgba } from './artwork';
+import { PlaneVisibility } from './planeVisibility';
 
 export type ArtworkMapping =
   | {
@@ -1055,70 +1056,68 @@ export function computePlacementImageQuad(
   };
 }
 
-function pointInPolygon2D(pt: Point2D, poly: readonly Point2D[]): boolean {
-  let inside = false;
-  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-    const pi = poly[i];
-    const pj = poly[j];
-    if (!pi || !pj) continue;
-    const intersects =
-      pi.y > pt.y !== pj.y > pt.y &&
-      pt.x < ((pj.x - pi.x) * (pt.y - pi.y)) / (pj.y - pi.y + 1e-12) + pi.x;
-    if (intersects) {
-      inside = !inside;
-    }
-  }
-  return inside;
-}
-
-function pointInConvexQuad(
-  pt: Point2D,
-  quad: readonly [Point2D, Point2D, Point2D, Point2D],
-): boolean {
-  let sign = 0;
-  for (let i = 0; i < 4; i++) {
-    const a = quad[i];
-    const b = quad[(i + 1) % 4];
-    if (!a || !b) return false;
-    const cross = (b.x - a.x) * (pt.y - a.y) - (b.y - a.y) * (pt.x - a.x);
-    if (Math.abs(cross) < 1e-6) continue;
-    const s = cross > 0 ? 1 : -1;
-    if (sign === 0) {
-      sign = s;
-    } else if (sign !== s) {
-      return false;
-    }
-  }
-  return sign !== 0;
-}
-
 export function hitTestPlacements(
   placements: readonly ArtworkPlacement[],
   imagePoint: Point2D,
   imageSize: Size2D,
   geometry: GeometryInput | null,
+  artworks?: readonly Artwork[],
 ): ArtworkPlacement | null {
   for (let i = placements.length - 1; i >= 0; i--) {
-    const p = placements[i];
-    if (!p || !p.visible) continue;
-    if (p.mapping.type === 'curved') {
-      const hitCoord = samplePlacementTextureCoord(p, imagePoint, imageSize, geometry);
-      if (hitCoord) {
-        return p;
+    const placement = placements[i];
+    if (!placement || !placement.visible || placement.opacity <= 0.001) continue;
+    const uv = samplePlacementTextureCoord(placement, imagePoint, imageSize, geometry);
+    if (!uv) continue;
+    if (placement.mapping.type !== 'image-2d') {
+      if (!geometry) continue;
+      const pixel = imagePointToInferencePixel(
+        imagePoint,
+        imageSize,
+        geometry.metadata.inference_width,
+        geometry.metadata.inference_height,
+      );
+      if (!pixel) continue;
+      const index = pixel.y * geometry.metadata.inference_width + pixel.x;
+      if (!isValidGridPixel(geometry, index)) continue;
+      if (placement.mapping.type === 'planar') {
+        const mapping = placement.mapping;
+        const visible = PlaneVisibility.evaluatePixel(
+          { x: imagePoint.x / imageSize.width, y: imagePoint.y / imageSize.height },
+          parseNormalizedIntrinsics(geometry.metadata.intrinsics),
+          mapping.frame,
+          { minU: -Infinity, maxU: Infinity, minV: -Infinity, maxV: Infinity },
+          true,
+          geometry.depth[index] ?? 0,
+          readNormalOpenCV(geometry, pixel.x, pixel.y),
+          {
+            depthToleranceRatio: mapping.depthToleranceRatio,
+            fitRms: mapping.rmsError,
+            minNormalDot: mapping.isApproximatelyPlanar ? 0.35 : 0.45,
+          },
+        );
+        if (!visible.visible || visible.alpha <= 0.001) continue;
+      } else {
+        const sample = sampleSurfaceMappingAtImagePoint(
+          placement.mapping.surfaceMapping,
+          imagePoint,
+          imageSize,
+        );
+        if (!sample) continue;
+        const tolerance = Math.max(0.015, sample.depth * 0.055);
+        const difference = (geometry.depth[index] ?? 0) - sample.depth;
+        if (difference < -tolerance || difference > tolerance * 2) continue;
       }
-      const quad = computePlacementImageQuad(p, imageSize, geometry);
-      if (quad) {
-        const poly = quad.outlinePolygon ?? quad.corners;
-        if (pointInPolygon2D(imagePoint, poly)) {
-          return p;
-        }
-      }
-      continue;
     }
-    const quad = computePlacementImageQuad(p, imageSize, geometry);
-    if (quad && pointInConvexQuad(imagePoint, quad.corners)) {
-      return p;
+    if (artworks) {
+      const artwork = artworks.find((item) => item.id === placement.artworkId);
+      if (!artwork) continue;
+      const rgba = rasterizeArtworkRgba(artwork);
+      const x = Math.min(artwork.width - 1, Math.floor(uv.x * artwork.width));
+      const y = Math.min(artwork.height - 1, Math.floor(uv.y * artwork.height));
+      if (((rgba[(y * artwork.width + x) * 4 + 3] ?? 0) / 255) * placement.opacity <= 0.001)
+        continue;
     }
+    return placement;
   }
   return null;
 }

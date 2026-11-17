@@ -1,5 +1,6 @@
 import type { Point2D, Size2D } from '../types/editor';
 import { clamp } from '../editor/viewportTransforms';
+import { blendSrgbBytes } from './colorSpace';
 import type { GeometryInput } from '../geometry/geometryAccess';
 import {
   CurvedBrushWorkspace,
@@ -23,6 +24,7 @@ export interface ImageSpaceStroke {
   id: string;
   layer: ImagePaintLayerKind;
   brushObjectId?: string;
+  order?: number;
   mode: BrushStrokeMode;
   brush: BrushSettings;
   layerWidth: number;
@@ -202,9 +204,9 @@ export function compositeImageStrokeOverRgba(
         const dstG = dstRgba[outBase + 1] ?? 0;
         const dstB = dstRgba[outBase + 2] ?? 0;
         const inv = 1 / outA;
-        dstRgba[outBase] = Math.round((sr * srcA + dstR * dstA * (1 - srcA)) * inv);
-        dstRgba[outBase + 1] = Math.round((sg * srcA + dstG * dstA * (1 - srcA)) * inv);
-        dstRgba[outBase + 2] = Math.round((sb * srcA + dstB * dstA * (1 - srcA)) * inv);
+        dstRgba[outBase] = blendSrgbBytes(sr, dstR, srcA * inv, dstA * (1 - srcA) * inv);
+        dstRgba[outBase + 1] = blendSrgbBytes(sg, dstG, srcA * inv, dstA * (1 - srcA) * inv);
+        dstRgba[outBase + 2] = blendSrgbBytes(sb, dstB, srcA * inv, dstA * (1 - srcA) * inv);
         dstRgba[outBase + 3] = Math.round(clamp(outA, 0, 1) * 255);
       }
     }

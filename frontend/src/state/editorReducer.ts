@@ -343,7 +343,7 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
         return state.viewMode === 'rgb' ? state : { ...state, viewMode: 'rgb' };
       }
       if (action.mode === 'albedo' || action.mode === 'shading' || action.mode === 'residual') {
-        const readyAppearance = state.appearance.status === 'ready' ? state.appearance.data : null;
+        const readyAppearance = state.appearance.data;
         if (!readyAppearance) {
           return state;
         }
@@ -352,7 +352,7 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
           viewMode: action.mode,
         };
       }
-      const readyData = state.geometry.status === 'ready' ? state.geometry.data : null;
+      const readyData = state.geometry.data;
       if (!readyData) {
         return state;
       }
@@ -375,7 +375,7 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
         viewMode: 'rgb',
         geometry: {
           status: 'loading',
-          data: null,
+          data: state.geometry.data,
           error: null,
         },
       };
@@ -385,6 +385,26 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
       // Ignore stale responses if the user replaced the image before completion.
       if (!state.image || state.image.id !== action.data.imageId) {
         return state;
+      }
+      if (
+        state.geometry.data &&
+        state.geometry.data.metadata.id !== action.data.metadata.id &&
+        [state.paint, ...state.paint.undoStack, ...state.paint.redoStack].some(
+          (snapshot) =>
+            snapshot.surfaces.length > 0 ||
+            snapshot.imageStrokes.some((stroke) => stroke.layer === 'curved') ||
+            snapshot.artworkPlacements.some((placement) => placement.mapping.type !== 'image-2d'),
+        )
+      ) {
+        return {
+          ...state,
+          geometry: {
+            ...state.geometry,
+            status: 'error',
+            error:
+              'The new reconstruction is incompatible with existing surface edits. Replace the photo to start a new reconstruction.',
+          },
+        };
       }
       return {
         ...state,
@@ -403,7 +423,7 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
         ...state,
         geometry: {
           status: 'error',
-          data: null,
+          data: state.geometry.data,
           error: action.message,
         },
       };
@@ -413,7 +433,9 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
         ...state,
         activeTool: resetGeometrySelectionTool(state.activeTool),
         viewMode: 'rgb',
-        geometry: IDLE_GEOMETRY,
+        geometry: state.geometry.data
+          ? { status: 'ready', data: state.geometry.data, error: null }
+          : IDLE_GEOMETRY,
       };
     }
 
@@ -430,7 +452,7 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
         viewMode: resetView ? 'rgb' : state.viewMode,
         appearance: {
           status: 'loading',
-          data: null,
+          data: state.appearance.data,
           error: null,
         },
       };
@@ -457,7 +479,7 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
         ...state,
         appearance: {
           status: 'error',
-          data: null,
+          data: state.appearance.data,
           error: action.message,
         },
       };
@@ -470,7 +492,9 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
       return {
         ...state,
         viewMode: resetView ? 'rgb' : state.viewMode,
-        appearance: IDLE_APPEARANCE,
+        appearance: state.appearance.data
+          ? { status: 'ready', data: state.appearance.data, error: null }
+          : IDLE_APPEARANCE,
       };
     }
 

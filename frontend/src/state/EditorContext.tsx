@@ -99,6 +99,21 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  useEffect(() => {
+    const retainedImages = new Set<LoadedImage>();
+    for (const snapshot of [state.paint, ...state.paint.undoStack, ...state.paint.redoStack]) {
+      for (const artwork of snapshot.artworks) {
+        if (artwork.kind === 'imported') retainedImages.add(artwork.image);
+      }
+    }
+    for (const image of importedArtImagesRef.current) {
+      if (!retainedImages.has(image)) {
+        image.dispose();
+        importedArtImagesRef.current.delete(image);
+      }
+    }
+  }, [state.paint]);
+
   const openFilePicker = useCallback(() => {
     fileInputRef.current?.click();
   }, []);
@@ -484,13 +499,8 @@ export function EditorProvider({ children }: { children: ReactNode }) {
 
   const removeArtwork = useCallback(
     (artworkId: string) => {
-      const target = PaintDocument.getArtworkById(stateRef.current.paint, artworkId);
       cancelActiveStrokes();
       dispatch({ type: 'ARTWORK_REMOVE', artworkId });
-      if (target && target.kind === 'imported') {
-        target.image.dispose();
-        importedArtImagesRef.current.delete(target.image);
-      }
     },
     [cancelActiveStrokes],
   );
@@ -609,7 +619,9 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     if (!image || !renderer) {
       dispatch({
         type: 'PAINT_EXPORT_DONE',
-        error: 'Load an image before exporting.',
+        error: image
+          ? 'The image renderer is unavailable. Reload the viewport and try again.'
+          : 'Load an image before exporting.',
       });
       return;
     }
@@ -620,7 +632,7 @@ export function EditorProvider({ children }: { children: ReactNode }) {
 
     if (picker) {
       try {
-        fileHandle = await picker({
+        fileHandle = await picker.call(window, {
           suggestedName,
           types: [{ description: 'PNG Image', accept: { 'image/png': ['.png'] } }],
         });

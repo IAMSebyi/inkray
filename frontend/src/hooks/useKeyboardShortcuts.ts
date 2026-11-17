@@ -43,7 +43,10 @@ export function useKeyboardShortcuts(): { isSpacePressed: boolean } {
 
   const hasImage = state.image !== null;
   const isArtworkMode = state.workspaceMode === 'artwork';
-  const hasOverlays = state.paint.surfaces.length > 0 || state.paint.artworkPlacements.length > 0;
+  const hasOverlays =
+    state.paint.surfaces.length > 0 ||
+    state.paint.imageStrokes.length > 0 ||
+    state.paint.artworkPlacements.length > 0;
   const activePlacementId = state.paint.activePlacementId;
   const activeTool = state.activeTool;
   const brushPixelSizeRef = useRef(state.paint.brushConfig.pixelSize);

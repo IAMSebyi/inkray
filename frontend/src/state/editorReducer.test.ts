@@ -401,10 +401,11 @@ describe('editorReducer', () => {
     state = editorReducer(state, { type: 'PAINT_REDO' });
     expect(state.paint.strokes.length).toBe(1);
 
-    // Cancelling appearance resets appearance status and returns view to RGB cleanly.
+    // Cancelling retains the last valid appearance and returns to RGB.
     state = editorReducer(state, { type: 'SET_VIEW_MODE', mode: 'albedo' });
     state = editorReducer(state, { type: 'APPEARANCE_CANCEL' });
-    expect(state.appearance.status).toBe('idle');
+    expect(state.appearance.status).toBe('ready');
+    expect(state.appearance.data).toBe(app1);
     expect(state.viewMode).toBe('rgb');
   });
 
@@ -554,4 +555,59 @@ describe('editorReducer', () => {
     state = editorReducer(state, { type: 'PAINT_UNDO' });
     expect(state.paint.brushObjects[0]?.visible).toBe(true);
   });
+});
+
+describe('inference retries', () => {
+  it('retains valid maps while loading, after cancellation and after an error', () => {
+    const image = createStubImage('retry', 100, 100);
+    const geometry = createStubGeometry(image.id);
+    const appearance = createStubAppearance(image.id);
+    let state = editorReducer(initialEditorState, { type: 'IMPORT_SUCCESS', image });
+    state = editorReducer(state, { type: 'GEOMETRY_SUCCESS', data: geometry });
+    state = editorReducer(state, { type: 'APPEARANCE_SUCCESS', data: appearance });
+    state = editorReducer(state, { type: 'GEOMETRY_START' });
+    state = editorReducer(state, { type: 'APPEARANCE_START' });
+    expect(state.geometry.data).toBe(geometry);
+    expect(state.appearance.data).toBe(appearance);
+    state = editorReducer(state, { type: 'GEOMETRY_CANCEL' });
+    state = editorReducer(state, { type: 'APPEARANCE_CANCEL' });
+    expect(state.geometry.status).toBe('ready');
+    expect(state.appearance.status).toBe('ready');
+    state = editorReducer(state, {
+      type: 'GEOMETRY_ERROR',
+      imageId: image.id,
+      message: 'Unavailable',
+    });
+    state = editorReducer(state, {
+      type: 'APPEARANCE_ERROR',
+      imageId: image.id,
+      message: 'Unavailable',
+    });
+    expect(state.geometry.data).toBe(geometry);
+    expect(state.appearance.data).toBe(appearance);
+  });
+});
+
+it('keeps the geometry used by existing surface edits when reconstruction settings change', () => {
+  const image = createStubImage('anchored', 100, 100);
+  const geometry = createStubGeometry(image.id);
+  let state = editorReducer(initialEditorState, { type: 'IMPORT_SUCCESS', image });
+  state = editorReducer(state, { type: 'GEOMETRY_SUCCESS', data: geometry });
+  const scene = createSyntheticPlanarScene({
+    width: 24,
+    height: 24,
+    planeOrigin: [0, 0, 3],
+    planeNormal: [0, 0, -1],
+  });
+  state = editorReducer(state, {
+    type: 'PAINT_SELECT_SURFACE',
+    selection: buildSyntheticSurfaceSelection(scene, 12, 12),
+  });
+  state = editorReducer(state, { type: 'GEOMETRY_START' });
+  state = editorReducer(state, {
+    type: 'GEOMETRY_SUCCESS',
+    data: { ...geometry, metadata: { ...geometry.metadata, id: 'different' } },
+  });
+  expect(state.geometry.data).toBe(geometry);
+  expect(state.geometry.error).toContain('incompatible');
 });

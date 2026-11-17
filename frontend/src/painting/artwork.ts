@@ -8,6 +8,12 @@ import {
   rebuildSurfaceDecalRgba,
 } from './brushEngine';
 
+export interface ArtworkSnapshot {
+  width: number;
+  height: number;
+  strokes: BrushStroke[];
+}
+
 export interface DrawnArtwork {
   kind: 'drawn';
   id: string;
@@ -15,8 +21,8 @@ export interface DrawnArtwork {
   width: number;
   height: number;
   strokes: BrushStroke[];
-  undoStack: BrushStroke[][];
-  redoStack: BrushStroke[][];
+  undoStack: ArtworkSnapshot[];
+  redoStack: ArtworkSnapshot[];
   revision: number;
 }
 
@@ -142,6 +148,10 @@ export function toPremultipliedRgba(straightRgba: Uint8ClampedArray): Uint8Array
   return out;
 }
 
+function artworkSnapshot(artwork: DrawnArtwork): ArtworkSnapshot {
+  return { width: artwork.width, height: artwork.height, strokes: artwork.strokes };
+}
+
 export const ArtworkModel = {
   createBlank(options?: { name?: string; width?: number; height?: number }): DrawnArtwork {
     const width = clampArtworkDimension(options?.width ?? DEFAULT_ARTWORK_DIMENSION);
@@ -183,6 +193,8 @@ export const ArtworkModel = {
       ...artwork,
       width: nextW,
       height: nextH,
+      undoStack: [...artwork.undoStack, artworkSnapshot(artwork)].slice(-MAX_ARTWORK_UNDO_STEPS),
+      redoStack: [],
       revision: artwork.revision + 1,
     };
   },
@@ -191,7 +203,7 @@ export const ArtworkModel = {
     if (stroke.surfaceId !== artwork.id || stroke.points.length === 0) {
       return artwork;
     }
-    const nextUndo = [...artwork.undoStack, artwork.strokes];
+    const nextUndo = [...artwork.undoStack, artworkSnapshot(artwork)];
     const trimmedUndo =
       nextUndo.length > MAX_ARTWORK_UNDO_STEPS
         ? nextUndo.slice(nextUndo.length - MAX_ARTWORK_UNDO_STEPS)
@@ -209,7 +221,7 @@ export const ArtworkModel = {
     if (artwork.strokes.length === 0) {
       return artwork;
     }
-    const nextUndo = [...artwork.undoStack, artwork.strokes];
+    const nextUndo = [...artwork.undoStack, artworkSnapshot(artwork)];
     const trimmedUndo =
       nextUndo.length > MAX_ARTWORK_UNDO_STEPS
         ? nextUndo.slice(nextUndo.length - MAX_ARTWORK_UNDO_STEPS)
@@ -241,9 +253,9 @@ export const ArtworkModel = {
     }
     return {
       ...artwork,
-      strokes: prev,
+      ...prev,
       undoStack: artwork.undoStack.slice(0, -1),
-      redoStack: [...artwork.redoStack, artwork.strokes],
+      redoStack: [...artwork.redoStack, artworkSnapshot(artwork)],
       revision: artwork.revision + 1,
     };
   },
@@ -258,8 +270,8 @@ export const ArtworkModel = {
     }
     return {
       ...artwork,
-      strokes: next,
-      undoStack: [...artwork.undoStack, artwork.strokes],
+      ...next,
+      undoStack: [...artwork.undoStack, artworkSnapshot(artwork)],
       redoStack: artwork.redoStack.slice(0, -1),
       revision: artwork.revision + 1,
     };

@@ -145,6 +145,7 @@ export function EditorViewport({
 
   const latestRenderStateRef = useRef({
     image: state.image,
+    workspaceMode: state.workspaceMode,
     viewportSize: state.viewportSize,
     dpr,
     viewMode: state.viewMode,
@@ -153,10 +154,12 @@ export function EditorViewport({
     appearance: state.appearance.data,
     paint: state.paint,
     isPanning,
+    isSpacePressed,
   });
 
   latestRenderStateRef.current = {
     image: state.image,
+    workspaceMode: state.workspaceMode,
     viewportSize: state.viewportSize,
     dpr,
     viewMode: state.viewMode,
@@ -165,11 +168,19 @@ export function EditorViewport({
     appearance: state.appearance.data,
     paint: state.paint,
     isPanning,
+    isSpacePressed,
   };
 
-  useElementSize(containerRef, setViewportSize);
+  const handleViewportResize = useCallback(
+    (size: Size2D) => {
+      if (size.width > 0 && size.height > 0) setViewportSize(size);
+    },
+    [setViewportSize],
+  );
+  useElementSize(containerRef, handleViewportResize);
 
   const drawCanvasNow = useCallback(() => {
+    if (latestRenderStateRef.current.workspaceMode !== 'photo') return;
     const canvas = canvasRef.current;
     if (!canvas) {
       return;
@@ -188,6 +199,7 @@ export function EditorViewport({
       appearance,
       paint,
       isPanning: currentIsPanning,
+      isSpacePressed: currentSpacePressed,
     } = latestRenderStateRef.current;
     if (viewMode === 'pointcloud' || viewMode === 'mesh') {
       return;
@@ -244,7 +256,8 @@ export function EditorViewport({
       image &&
       viewMode === 'rgb' &&
       !currentIsPanning &&
-      !isSpacePressed &&
+      !currentSpacePressed &&
+      !paint.cleanPreview &&
       cursorViewportPointRef.current
         ? buildBrushCursorPreview({
             tool: activeTool,
@@ -276,7 +289,7 @@ export function EditorViewport({
       brushCursor,
       placementGizmo,
     });
-  }, [brushEngineRef, imageBrushEngineRef, isSpacePressed, paintRendererRef]);
+  }, [brushEngineRef, imageBrushEngineRef, paintRendererRef]);
 
   useEffect(() => {
     const host = paintHostRef.current;
@@ -326,6 +339,7 @@ export function EditorViewport({
     drawCanvasNow();
   }, [
     state.transform,
+    state.workspaceMode,
     state.image,
     state.viewportSize,
     state.viewMode,
@@ -534,6 +548,7 @@ export function EditorViewport({
               imagePoint,
               imageSize,
               state.geometry.data,
+              state.paint.artworks,
             );
             if (directHit) {
               dragMode = 'move';
@@ -561,6 +576,7 @@ export function EditorViewport({
         imagePoint,
         imageSize,
         state.geometry.data,
+        state.paint.artworks,
       );
       if (picked) {
         setActivePlacement(picked.id);
@@ -976,6 +992,7 @@ export function EditorViewport({
   return (
     <main
       ref={containerRef}
+      style={state.workspaceMode === 'artwork' ? { display: 'none' } : undefined}
       className={`editor-viewport ${cursorModeClass}`}
       aria-label="Image editor viewport"
       onDragEnter={dropZoneProps.onDragEnter}
@@ -1014,7 +1031,7 @@ export function EditorViewport({
 
       {state.isLoading && (
         <div className="viewport-loading-overlay" aria-live="polite">
-          <div className="loading-pill">Loading image…</div>
+          <div className="loading-pill">Loading image...</div>
         </div>
       )}
 

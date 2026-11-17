@@ -4,6 +4,7 @@ import { RightSidebar } from './components/RightSidebar';
 import { StatusBar } from './components/StatusBar';
 import { TopToolbar } from './components/TopToolbar';
 import { EditorViewport } from './editor/EditorViewport';
+import { ViewportErrorBoundary } from './editor/ViewportErrorBoundary';
 import { useEditor } from './hooks/useEditor';
 import { useImageImport } from './hooks/useImageImport';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
@@ -49,15 +50,14 @@ function InkrayEditorShell() {
 
       <div className="editor-workspace">
         <LeftToolbar />
-        {state.workspaceMode === 'artwork' ? (
-          <ArtworkCanvasView />
-        ) : (
+        {state.workspaceMode === 'artwork' && <ArtworkCanvasView />}
+        <ViewportErrorBoundary hidden={state.workspaceMode === 'artwork'}>
           <EditorViewport
             isSpacePressed={isSpacePressed}
             isDragActive={isDragActive}
             dropZoneProps={dropZoneProps}
           />
-        )}
+        </ViewportErrorBoundary>
         <RightSidebar />
       </div>
 

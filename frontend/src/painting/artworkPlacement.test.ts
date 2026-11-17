@@ -535,3 +535,47 @@ describe('ArtworkPlacement & automatic planar projection', () => {
     ).not.toBeNull();
   });
 });
+
+it('does not select occluded, transparent or zero-opacity artwork', () => {
+  const scene = createSyntheticPlanarScene({
+    width: 64,
+    height: 64,
+    planeOrigin: [0, 0, 3],
+    planeNormal: [0, 0, -1],
+  });
+  const imageSize = { width: 640, height: 640 };
+  const artwork = createDrawnLogo();
+  const placement = createAutomaticArtworkPlacement({
+    artwork,
+    imagePoint: { x: 320, y: 320 },
+    imageSize,
+    geometry: scene.geometry,
+  });
+  expect(
+    hitTestPlacements([placement], { x: 320, y: 320 }, imageSize, scene.geometry, [artwork])?.id,
+  ).toBe(placement.id);
+  expect(
+    hitTestPlacements(
+      [{ ...placement, opacity: 0 }],
+      { x: 320, y: 320 },
+      imageSize,
+      scene.geometry,
+      [artwork],
+    ),
+  ).toBeNull();
+  const transparent = ArtworkModel.createBlank();
+  const empty = { ...placement, artworkId: transparent.id };
+  expect(
+    hitTestPlacements([empty], { x: 320, y: 320 }, imageSize, scene.geometry, [transparent]),
+  ).toBeNull();
+  const occluded = createSyntheticPlanarScene({
+    width: 64,
+    height: 64,
+    planeOrigin: [0, 0, 3],
+    planeNormal: [0, 0, -1],
+    occluders: [{ minCol: 28, maxCol: 36, minRow: 28, maxRow: 36, depth: 1 }],
+  });
+  expect(
+    hitTestPlacements([placement], { x: 320, y: 320 }, imageSize, occluded.geometry, [artwork]),
+  ).toBeNull();
+});

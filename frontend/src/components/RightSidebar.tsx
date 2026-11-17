@@ -21,7 +21,7 @@ import { getCheckerboardTileCanvas } from '../editor/canvasRenderer';
 import { computeFovYDegrees } from '../editor/pointCloudBuilder';
 import { useEditor } from '../hooks/useEditor';
 import { ARTWORK_DRAG_MIME, type Artwork, rasterizeArtworkRgba } from '../painting/artwork';
-import { normalizeAngleRad } from '../painting/artworkPlacement';
+import { type ArtworkPlacement, normalizeAngleRad } from '../painting/artworkPlacement';
 import { calibrateShadingScale } from '../painting/colorSpace';
 import { PaintDocument } from '../painting/paintDocument';
 import type { PaintMode } from '../types/editor';
@@ -113,6 +113,15 @@ export function RightSidebar() {
     setPaintMode,
     setTexturePreservation,
   } = useEditor();
+
+  const placementEditRef = useRef<string | null>(null);
+  const finishPlacementEdit = () => {
+    placementEditRef.current = null;
+  };
+  const updatePlacementControl = (placement: ArtworkPlacement) => {
+    updatePlacement(placement, placementEditRef.current !== placement.id);
+    placementEditRef.current = placement.id;
+  };
 
   const [draggedSceneIndex, setDraggedSceneIndex] = useState<number | null>(null);
   const [dropTargetIndex, setDropTargetIndex] = useState<number | null>(null);
@@ -807,12 +816,16 @@ export function RightSidebar() {
                       min={0.1}
                       max={4.0}
                       step={0.05}
+                      onPointerUp={finishPlacementEdit}
+                      onPointerCancel={finishPlacementEdit}
+                      onKeyUp={finishPlacementEdit}
+                      onBlur={finishPlacementEdit}
                       value={Math.min(4.0, Math.max(0.1, activePlacement.scale))}
                       onChange={(e) =>
-                        updatePlacement(
-                          { ...activePlacement, scale: parseFloat(e.target.value) },
-                          true,
-                        )
+                        updatePlacementControl({
+                          ...activePlacement,
+                          scale: parseFloat(e.target.value),
+                        })
                       }
                     />
                   </label>
@@ -830,17 +843,18 @@ export function RightSidebar() {
                       min={-180}
                       max={180}
                       step={1}
+                      onPointerUp={finishPlacementEdit}
+                      onPointerCancel={finishPlacementEdit}
+                      onKeyUp={finishPlacementEdit}
+                      onBlur={finishPlacementEdit}
                       value={Math.round((activePlacement.rotationRad * 180) / Math.PI)}
                       onChange={(e) =>
-                        updatePlacement(
-                          {
-                            ...activePlacement,
-                            rotationRad: normalizeAngleRad(
-                              (parseFloat(e.target.value) * Math.PI) / 180,
-                            ),
-                          },
-                          true,
-                        )
+                        updatePlacementControl({
+                          ...activePlacement,
+                          rotationRad: normalizeAngleRad(
+                            (parseFloat(e.target.value) * Math.PI) / 180,
+                          ),
+                        })
                       }
                     />
                   </label>
@@ -856,12 +870,16 @@ export function RightSidebar() {
                       min={0.05}
                       max={1.0}
                       step={0.05}
+                      onPointerUp={finishPlacementEdit}
+                      onPointerCancel={finishPlacementEdit}
+                      onKeyUp={finishPlacementEdit}
+                      onBlur={finishPlacementEdit}
                       value={activePlacement.opacity}
                       onChange={(e) =>
-                        updatePlacement(
-                          { ...activePlacement, opacity: parseFloat(e.target.value) },
-                          true,
-                        )
+                        updatePlacementControl({
+                          ...activePlacement,
+                          opacity: parseFloat(e.target.value),
+                        })
                       }
                     />
                   </label>
@@ -997,7 +1015,7 @@ export function RightSidebar() {
                 }}
               >
                 <X size={13} strokeWidth={1.75} />
-                <span>Cancel Inference</span>
+                <span>Stop Waiting</span>
               </button>
             ) : (
               <button
@@ -1158,7 +1176,7 @@ export function RightSidebar() {
                 }}
               >
                 <X size={13} strokeWidth={1.75} />
-                <span>Cancel Appearance</span>
+                <span>Stop Waiting</span>
               </button>
             ) : (
               <button

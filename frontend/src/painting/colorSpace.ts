@@ -258,3 +258,19 @@ export function compositeLightingAwarePixel(params: {
   }
   return out;
 }
+
+const SRGB_BYTE_TO_LINEAR = Float64Array.from({ length: 256 }, (_, value) =>
+  srgbChannelToLinear(value / 255),
+);
+
+export function blendSrgbBytes(
+  source: number,
+  destination: number,
+  sourceWeight: number,
+  destinationWeight: number,
+): number {
+  const linear =
+    (SRGB_BYTE_TO_LINEAR[source] ?? 0) * sourceWeight +
+    (SRGB_BYTE_TO_LINEAR[destination] ?? 0) * destinationWeight;
+  return Math.round(linearChannelToSrgb(linear) * 255);
+}

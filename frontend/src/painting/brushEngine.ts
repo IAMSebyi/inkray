@@ -1,5 +1,6 @@
 import type { PlaneFootprint } from '../geometry/planeFrame';
 import { clamp } from '../editor/viewportTransforms';
+import { blendSrgbBytes } from './colorSpace';
 import { type DecalTextureSpec, decalTexelToPlaneCoords, isInsideFootprint } from './planarDecal';
 
 export interface BrushSettings {
@@ -21,6 +22,7 @@ export interface BrushStroke {
   id: string;
   surfaceId: string;
   brushObjectId?: string;
+  order?: number;
   mode?: BrushStrokeMode;
   brush: BrushSettings;
   points: BrushPoint[];
@@ -276,9 +278,9 @@ export function compositeStrokeMaskOverRgba(
       const dstB = dstRgba[outBase + 2] ?? 0;
 
       const invOutA = 1 / outA;
-      dstRgba[outBase] = Math.round((sr * srcA + dstR * dstA * (1 - srcA)) * invOutA);
-      dstRgba[outBase + 1] = Math.round((sg * srcA + dstG * dstA * (1 - srcA)) * invOutA);
-      dstRgba[outBase + 2] = Math.round((sb * srcA + dstB * dstA * (1 - srcA)) * invOutA);
+      dstRgba[outBase] = blendSrgbBytes(sr, dstR, srcA * invOutA, dstA * (1 - srcA) * invOutA);
+      dstRgba[outBase + 1] = blendSrgbBytes(sg, dstG, srcA * invOutA, dstA * (1 - srcA) * invOutA);
+      dstRgba[outBase + 2] = blendSrgbBytes(sb, dstB, srcA * invOutA, dstA * (1 - srcA) * invOutA);
       dstRgba[outBase + 3] = Math.round(clamp(outA, 0, 1) * 255);
     }
   }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  blendSrgbBytes,
   calibrateShadingScale,
   compositeLightingAwarePixel,
   linearChannelToSrgb,
@@ -212,4 +213,8 @@ describe('colorSpace & lighting-aware compositing', () => {
     });
     expect(flatLit).toEqual(flatShadow);
   });
+});
+
+it('blends partial coverage in linear light before encoding to sRGB', () => {
+  expect(blendSrgbBytes(255, 0, 0.5, 0.5)).toBe(188);
 });

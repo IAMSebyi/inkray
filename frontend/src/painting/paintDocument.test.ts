@@ -478,3 +478,42 @@ describe('PaintDocument & PlanarDecal', () => {
     expect(PaintDocument.getStrokesForSurface(doc, surface.id, brush2Id).length).toBe(1);
   });
 });
+
+it('restores deleted artwork and placements through undo and redo', () => {
+  const artwork = ArtworkModel.createBlank();
+  let doc = PaintDocument.addArtwork(PaintDocument.createInitial(), artwork);
+  const placement = createAutomaticArtworkPlacement({
+    artwork,
+    imagePoint: { x: 50, y: 50 },
+    imageSize: { width: 100, height: 100 },
+    geometry: null,
+  });
+  doc = PaintDocument.addPlacement(doc, placement);
+  doc = PaintDocument.removeArtwork(doc, artwork.id);
+  expect(doc.artworks).toHaveLength(0);
+  doc = PaintDocument.undo(doc);
+  expect(doc.artworks).toEqual([artwork]);
+  expect(doc.artworkPlacements).toEqual([placement]);
+  doc = PaintDocument.redo(doc);
+  expect(doc.artworks).toHaveLength(0);
+  expect(doc.artworkPlacements).toHaveLength(0);
+});
+
+it('can undo deletion of an artwork without placements', () => {
+  const artwork = ArtworkModel.createBlank();
+  const doc = PaintDocument.removeArtwork(
+    PaintDocument.addArtwork(PaintDocument.createInitial(), artwork),
+    artwork.id,
+  );
+  expect(PaintDocument.undo(doc).artworks).toEqual([artwork]);
+});
+
+it('retains source artwork edits when undoing a photo operation', () => {
+  const artwork = ArtworkModel.createBlank();
+  let doc = PaintDocument.addArtwork(PaintDocument.createInitial(), artwork);
+  doc = PaintDocument.createBrushObject(doc);
+  const resized = ArtworkModel.resizeDrawn(artwork, 64, 32);
+  doc = PaintDocument.updateArtwork(doc, resized);
+  doc = PaintDocument.undo(doc);
+  expect(doc.artworks).toEqual([resized]);
+});

@@ -1,6 +1,7 @@
 import type { LoadedImage } from '../types/editor';
 import {
   detectImageFormatFromBytes,
+  MAX_IMAGE_PIXELS,
   mimeTypeToFormatLabel,
   validateImageFile,
 } from '../utils/fileValidation';
@@ -130,6 +131,9 @@ export async function loadImageFromFile(file: File, signal?: AbortSignal): Promi
     const element = await decodeHtmlImage(objectUrl, file.name, signal);
     if (signal?.aborted) {
       throw new DOMException('Image loading was cancelled.', 'AbortError');
+    }
+    if (element.naturalWidth * element.naturalHeight > MAX_IMAGE_PIXELS) {
+      throw new ImageLoadError('Images must contain no more than 64 million pixels.');
     }
     const id = `img-${nextImageId++}`;
 

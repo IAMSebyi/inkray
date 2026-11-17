@@ -5,6 +5,7 @@ import { clamp } from '../editor/viewportTransforms';
 import type { Artwork } from './artwork';
 import type { ArtworkPlacement } from './artworkPlacement';
 import type { BrushSettings, BrushStroke } from './brushEngine';
+import { nextStrokeOrder } from './brushLayers';
 import type { ImageSpaceStroke } from './imageSpacePaint';
 import { type PlanarDecalSurface, getEffectiveFootprint } from './planarDecal';
 
@@ -25,6 +26,8 @@ export interface BrushObject {
 export type SceneLayerRef = { kind: 'brush'; id: string } | { kind: 'artwork'; id: string };
 
 export interface PaintHistorySnapshot {
+  artworks: Artwork[];
+  activeArtworkId: string | null;
   surfaces: PlanarDecalSurface[];
   activeSurfaceId: string | null;
   strokes: BrushStroke[];
@@ -84,6 +87,8 @@ let nextBrushObjSeq = 1;
 
 function createSnapshot(doc: PaintDocumentState): PaintHistorySnapshot {
   return {
+    artworks: doc.artworks,
+    activeArtworkId: doc.activeArtworkId,
     surfaces: doc.surfaces,
     activeSurfaceId: doc.activeSurfaceId,
     strokes: doc.strokes,
@@ -155,7 +160,7 @@ function restoreSnapshot(
   undoStack: PaintHistorySnapshot[],
   redoStack: PaintHistorySnapshot[],
 ): PaintDocumentState {
-  const liveArtworkIds = new Set(doc.artworks.map((a) => a.id));
+  const liveArtworkIds = new Set(snapshot.artworks.map((a) => a.id));
   const validPlacements = snapshot.artworkPlacements.filter((p) => liveArtworkIds.has(p.artworkId));
   const validPlacementIds = new Set(validPlacements.map((p) => p.id));
   const validBrushIds = new Set(snapshot.brushObjects.map((b) => b.id));
@@ -173,6 +178,8 @@ function restoreSnapshot(
 
   return {
     ...doc,
+    artworks: snapshot.artworks,
+    activeArtworkId: snapshot.activeArtworkId,
     surfaces: snapshot.surfaces,
     activeSurfaceId: snapshot.activeSurfaceId,
     strokes: snapshot.strokes,
@@ -430,11 +437,15 @@ export const PaintDocument = {
       return doc;
     }
     const resolved = resolveTargetBrushObject(doc, valid[0]?.brushObjectId);
-    const tagged = valid.map((s) =>
-      s.brushObjectId && resolved.brushObjects.some((b) => b.id === s.brushObjectId)
-        ? s
-        : { ...s, brushObjectId: resolved.brushObjectId },
-    );
+    const order = nextStrokeOrder(doc.strokes, doc.imageStrokes);
+    const tagged = valid.map((stroke, index) => ({
+      ...stroke,
+      brushObjectId:
+        stroke.brushObjectId && resolved.brushObjects.some((b) => b.id === stroke.brushObjectId)
+          ? stroke.brushObjectId
+          : resolved.brushObjectId,
+      order: order + index,
+    }));
     return {
       ...doc,
       brushObjects: resolved.brushObjects,
@@ -481,11 +492,16 @@ export const PaintDocument = {
 
     const requestedBrushId = validPlanar?.brushObjectId ?? validImage?.brushObjectId;
     const resolved = resolveTargetBrushObject(doc, requestedBrushId);
+    const order = nextStrokeOrder(doc.strokes, doc.imageStrokes);
     const taggedPlanar = validPlanar
-      ? { ...validPlanar, brushObjectId: resolved.brushObjectId }
+      ? { ...validPlanar, brushObjectId: resolved.brushObjectId, order }
       : null;
     const taggedImage = validImage
-      ? { ...validImage, brushObjectId: resolved.brushObjectId }
+      ? {
+          ...validImage,
+          brushObjectId: resolved.brushObjectId,
+          order: order + (validPlanar ? 1 : 0),
+        }
       : null;
 
     return {
@@ -574,6 +590,8 @@ export const PaintDocument = {
     return {
       ...doc,
       artworks: [...doc.artworks, artwork],
+      undoStack: pushUndoSnapshot(doc),
+      redoStack: [],
       activeArtworkId: artwork.id,
       nextArtworkNumber: doc.nextArtworkNumber + 1,
     };
@@ -586,6 +604,14 @@ export const PaintDocument = {
     return {
       ...doc,
       artworks: doc.artworks.map((item) => (item.id === artwork.id ? artwork : item)),
+      undoStack: doc.undoStack.map((snapshot) => ({
+        ...snapshot,
+        artworks: snapshot.artworks.map((item) => (item.id === artwork.id ? artwork : item)),
+      })),
+      redoStack: doc.redoStack.map((snapshot) => ({
+        ...snapshot,
+        artworks: snapshot.artworks.map((item) => (item.id === artwork.id ? artwork : item)),
+      })),
     };
   },
 
@@ -611,6 +637,8 @@ export const PaintDocument = {
         ...doc,
         artworks: nextArtworks,
         activeArtworkId: nextActiveArtwork,
+        undoStack: pushUndoSnapshot(doc),
+        redoStack: [],
       };
     }
     const nextPlacements = doc.artworkPlacements.filter((p) => !removedPlacementIds.has(p.id));

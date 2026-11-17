@@ -92,7 +92,10 @@ export function TopToolbar() {
     !isArtworkMode &&
     (state.viewMode === 'pointcloud' || state.viewMode === 'mesh') &&
     geometryData !== null;
-  const hasOverlays = state.paint.surfaces.length > 0 || state.paint.artworkPlacements.length > 0;
+  const hasOverlays =
+    state.paint.surfaces.length > 0 ||
+    state.paint.imageStrokes.length > 0 ||
+    state.paint.artworkPlacements.length > 0;
   const isCleanPreview = state.paint.cleanPreview;
   const zoomDisabled = isArtworkMode || !hasImage || isPointCloudMode;
   const canUndo = isArtworkMode
@@ -142,10 +145,10 @@ export function TopToolbar() {
             type="button"
             className="toolbar-button toolbar-button-busy"
             onClick={(e) => blurAfterAction(e, cancelGeometry)}
-            title="Cancel running geometry inference"
+            title="Stop waiting for geometry; backend inference continues"
           >
             <X size={14} strokeWidth={1.75} />
-            <span>Cancel Inference</span>
+            <span>Stop Waiting</span>
           </button>
         ) : (
           <button
@@ -171,10 +174,10 @@ export function TopToolbar() {
             type="button"
             className="toolbar-button toolbar-button-busy"
             onClick={(e) => blurAfterAction(e, cancelAppearance)}
-            title="Cancel running appearance inference"
+            title="Stop waiting for appearance; backend inference continues"
           >
             <X size={14} strokeWidth={1.75} />
-            <span>Cancel Appearance</span>
+            <span>Stop Waiting</span>
           </button>
         ) : (
           <button
