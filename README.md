@@ -4,6 +4,8 @@
 
 Inkray is an open-source, geometry- and lighting-aware photo editor inspired by Adobe's Project Deep Brush. Instead of editing photographs solely in flat screen coordinates, Inkray reconstructs monocular 3D geometry and intrinsic lighting layers once per photograph, then runs real-time perspective painting, curved-surface artwork wrapping, layered object compositing, foreground occlusion, and illumination-aware shading directly on the GPU.
 
+![Surface-aware painting and artwork placement in Inkray](assets/inkray-demo.gif)
+
 ---
 
 ## Contents
@@ -13,6 +15,8 @@ Inkray is an open-source, geometry- and lighting-aware photo editor inspired by 
 - [Quick Start](#quick-start)
 - [Backend Configuration](#backend-configuration)
 - [Workflow & Shortcuts](#workflow--shortcuts)
+  - [Quick UI Tutorial](#quick-ui-tutorial)
+  - [Keyboard Shortcuts](#keyboard-shortcuts)
 - [API Endpoints](#api-endpoints)
 - [Development & Verification](#development--verification)
 - [Project Structure](#project-structure)
@@ -68,6 +72,8 @@ flowchart LR
 
 > Note: Running **Generate Geometry** or **Generate Appearance** downloads upstream pretrained weights from Hugging Face into your local cache (`~/.cache/huggingface`) on first use.
 
+Authentication is optional for the public checkpoints. Run `hf auth login` in the backend environment to authenticate Hugging Face downloads and use higher request limits.
+
 ### 1. Set Up & Start the Backend
 
 Choose either **Anaconda / Miniconda** (recommended) or a standard Python **`venv`**.
@@ -115,6 +121,12 @@ Verify and start the API server with:
 .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
+On Windows, match the Triton version to the installed PyTorch version using the [Triton Windows compatibility table](https://github.com/triton-lang/triton-windows#3-pytorch). For PyTorch 2.10 or 2.11, install Triton 3.6 in the same backend environment:
+
+```bash
+pip install "triton-windows>=3.6,<3.7"
+```
+
 ### 2. Install & Start the Frontend
 
 In a second terminal:
@@ -138,6 +150,8 @@ Optional environment variables supported by `backend/app/config.py`:
 | `INKRAY_MOGE_MODEL_ID` | `Ruicheng/moge-3-vitl` | Hugging Face MoGe-3 checkpoint ID |
 | `INKRAY_APPEARANCE_MODEL_ID` | `prs-eth/marigold-iid-lighting-v1-1` | Hugging Face Marigold IID Lighting checkpoint ID |
 | `INKRAY_DEVICE` | `auto` | `auto`, `cuda`, or `cpu` |
+| `INKRAY_MAX_UPLOAD_BYTES` | `33554432` | Maximum uploaded file size in bytes (32 MiB) |
+| `INKRAY_MAX_IMAGE_PIXELS` | `64000000` | Maximum source image pixel count before decoding |
 | `INKRAY_MAX_IMAGE_SIZE` | `1024` | Maximum image edge sent to MoGe-3 |
 | `INKRAY_APPEARANCE_MAX_IMAGE_SIZE` | `1024` | Maximum image edge sent to Marigold |
 | `INKRAY_MOGE_RESOLUTION_LEVEL` | `9` | MoGe-3 inference resolution level |
@@ -156,19 +170,20 @@ Optional environment variables supported by `backend/app/config.py`:
 
 ## Workflow & Shortcuts
 
-### Typical Editing Workflow
+### Quick UI Tutorial
 
-1. **Import a Photograph:** Click **Import Image** (`O`) or drag and drop a JPEG/PNG into the viewport. You can paint immediately in 2D or run 3D reconstruction.
-2. **Reconstruct Scene Layers:**
-   - Click **Generate Geometry** to infer depth, normals, 3D point map, validity mask, and camera intrinsics with MoGe-3.
-   - Optionally click **Generate Appearance** to estimate intrinsic albedo, diffuse shading, and residual layers with Marigold IID Lighting v1.1.
-3. **Paint, Place Artwork & Order Scene Objects:**
-   - Use **Brush** (`B`) or **Eraser** (`E`) directly on the photograph -- Inkray automatically anchors each stroke to planar perspective, curved mesh geodesics, or 2D space inside your active Brush Object.
-   - Click **New Brush** (or **New Brush Object**) whenever you want to paint into a separate Brush Object that can sit in front of or behind other objects.
-   - Switch to **Artwork** (or click **New Canvas** / **Import Art** in the right sidebar) to paint transparent 2D assets or import PNG/JPEG logos, then drag them onto the photo or click the `+` placement action.
-   - With **Pointer** (`V`), drag placements across surfaces, scale via corners, rotate from the top knob, adjust opacity, or click **Re-anchor** / **Edit Art** in the inspector.
-   - Drag items in the **Scene Objects** list to reorder front-to-back display priority (index `#1` at top renders in front), or toggle individual object visibility.
-4. **Adjust Compositing & Export:** Choose **Flat**, **Shading**, or **Texture** in **Intrinsic Lighting**, toggle **Final View** (`P`) to inspect without guides, and click **Export PNG** to choose a save location and export at the photograph's full original resolution.
+The top toolbar handles import, reconstruction, views, and export. Tools are on the left; brush settings, artwork, and scene objects are in the right sidebar.
+
+1. **Load a Photograph:** Click **Import Image** (`O`) or drop a JPEG/PNG into the viewport. Click **Generate Geometry** before painting to make new strokes follow scene surfaces; without geometry, painting works in 2D. Use the top view buttons to inspect depth or normals, then return to **RGB** to edit.
+2. **Paint on the Photo:** Select **Brush** (`B`), choose **Color**, **Size**, **Opacity**, and **Hardness** in the sidebar, then drag to paint. **Eraser** (`E`) removes paint from the active Brush Object. Click **New Brush** to keep another set of strokes separate. Scroll to zoom, hold `Space` and drag to pan, and press `F` to fit the photo.
+3. **Match the Lighting:** Click **Generate Appearance**, then choose a mode under **Intrinsic Lighting**: **Flat** for plain color, **Shading** to preserve scene shadows, or **Texture** to retain surface detail. In **Texture** mode, adjust **Texture Detail** to control how much detail shows through.
+4. **Add Artwork:** In the sidebar, use **New Canvas** to draw on a transparent canvas or **Import Art** to load a PNG/JPEG. Click **Photo View** to return from the artwork workspace, then drag an artwork from the sidebar onto the photo. Its `+` button places a copy at the photo center.
+5. **Arrange the Scene:** Select **Pointer** (`V`) to move placed artwork, drag its corners to scale, or use the top handle to rotate. Adjust **Opacity** or use **Edit Art** in the inspector. In **Scene Objects**, select a Brush Object to paint into it, drag rows to reorder them (`#1` is in front), and use the eye buttons to toggle visibility.
+6. **Review & Export:** Use `Ctrl/Cmd + Z` to undo and `Ctrl/Cmd + Shift + Z` to redo. Click **Final View** (`P`) to hide guides and handles, then **Export PNG** to save the composite at the original photo resolution.
+
+Generating geometry or appearance again keeps the last successful result available while the new request runs. A reconstruction with different settings does not replace geometry used by existing surface edits. **Stop Waiting** stops waiting in the editor and preserves that result; inference already running in the backend continues and may populate the disk cache.
+
+Brush strokes retain their gesture order when switching between 2D, planar, and curved painting. The eraser removes paint within the active Brush Object across those projections. Artwork deletion and canvas resizing support undo/redo, and PNG export remains available from the artwork workspace when a photograph is loaded.
 
 ### Keyboard Shortcuts
 
@@ -282,6 +297,8 @@ inkray/
 - Intrinsic curved-surface wrapping parameterizes a bounded connected 2.5D patch; severe topological folds, needle singularities, or heavily disconnected patches fall back to 2D overlay with an inspector notice.
 - Lighting-aware compositing uses an additive-diffuse model over linear albedo and calibrated shading (`I_out = I_orig + alpha * S_cal * (P - A)`); it preserves existing diffuse shadows rather than synthesizing directional lights or physical specular relighting.
 - When alternating between MoGe-3 and Marigold on 8 GB GPUs (`INKRAY_OFFLOAD_INACTIVE_MODELS=true`), inactive model weights swap between VRAM and CPU RAM.
+- The editor requires WebGL2 with floating-point render target support.
+- Image imports are limited to 32 MiB and 64 million source pixels; backend upload and pixel limits can be configured separately.
 - Maximum PNG export size is bounded by the active WebGL2 GPU's `MAX_TEXTURE_SIZE` and `MAX_RENDERBUFFER_SIZE` limits.
 - Export folder selection uses the browser File System Access API (`showSaveFilePicker`) in supported browsers and falls back to browser downloads elsewhere.
 
