@@ -5,6 +5,8 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class Settings:
+    max_upload_bytes: int = int(os.getenv("INKRAY_MAX_UPLOAD_BYTES", "33554432"))
+    max_image_pixels: int = int(os.getenv("INKRAY_MAX_IMAGE_PIXELS", "64000000"))
     model_id: str = os.getenv("INKRAY_MOGE_MODEL_ID", "Ruicheng/moge-3-vitl")
     device: str = os.getenv("INKRAY_DEVICE", "auto")
     use_fp16: bool = os.getenv("INKRAY_MOGE_FP16", "true").lower() in ("1", "true", "yes")

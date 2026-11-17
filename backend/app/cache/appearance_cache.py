@@ -8,7 +8,7 @@ import numpy as np
 from ..appearance.maps import AlbedoMap, ResidualMap, ShadingMap
 from ..appearance.result import AppearanceResult
 from .geometry_cache import compute_image_sha256
-from .storage import is_valid_cache_id, write_npz_and_json
+from .storage import is_valid_cache_id, read_cache_metadata, write_npz_and_json
 
 APPEARANCE_CACHE_FORMAT_VERSION = 1
 AppearanceMapKind = Literal["albedo", "shading", "residual"]
@@ -134,13 +134,18 @@ class AppearanceCache:
     def get_metadata(self, cache_id: str) -> AppearanceRecordMetadata | None:
         if not is_valid_cache_id(cache_id):
             return None
-        meta_path = self._meta_path(cache_id)
-        if not meta_path.is_file():
+        raw = read_cache_metadata(
+            self._meta_path(cache_id), self._npz_path(cache_id), APPEARANCE_CACHE_FORMAT_VERSION,
+            VALID_APPEARANCE_MAP_KINDS,
+        )
+        if raw is None:
             return None
-        raw = json.loads(meta_path.read_text(encoding="utf-8"))
-        if raw.get("cache_version") != APPEARANCE_CACHE_FORMAT_VERSION:
+        if not set(VALID_APPEARANCE_MAP_KINDS).issubset(raw["arrays"]):
             return None
-        return AppearanceRecordMetadata(**raw)
+        try:
+            return AppearanceRecordMetadata(**raw)
+        except TypeError:
+            return None
 
     def put(
         self,

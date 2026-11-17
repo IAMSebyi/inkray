@@ -11,7 +11,7 @@ from ..geometry.mask import ValidMask
 from ..geometry.normals import NormalMap
 from ..geometry.points import Points3D
 from ..geometry.result import GeometryResult
-from .storage import is_valid_cache_id, write_npz_and_json
+from .storage import is_valid_cache_id, read_cache_metadata, write_npz_and_json
 
 CACHE_FORMAT_VERSION = 1
 MapKind = Literal["depth", "normals", "points", "mask"]
@@ -134,13 +134,21 @@ class GeometryCache:
     def get_metadata(self, cache_id: str) -> GeometryRecordMetadata | None:
         if not is_valid_cache_id(cache_id):
             return None
-        meta_path = self._meta_path(cache_id)
-        if not meta_path.is_file():
+        raw = read_cache_metadata(
+            self._meta_path(cache_id), self._npz_path(cache_id), CACHE_FORMAT_VERSION,
+            ("depth", "points", "mask", "intrinsics"),
+        )
+        if raw is None:
             return None
-        raw = json.loads(meta_path.read_text(encoding="utf-8"))
-        if raw.get("cache_version") != CACHE_FORMAT_VERSION:
+        required_maps = {"depth", "points", "mask"}
+        if raw.get("has_normals"):
+            required_maps.add("normals")
+        if not required_maps.issubset(raw["arrays"]):
             return None
-        return GeometryRecordMetadata(**raw)
+        try:
+            return GeometryRecordMetadata(**raw)
+        except TypeError:
+            return None
 
     def put(
         self,

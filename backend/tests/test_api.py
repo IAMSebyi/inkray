@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 import numpy as np
 from PIL import Image
 
+from app.appearance.result import AppearanceResult
 from app.config import Settings
 from app.geometry.depth import DepthMap
 from app.geometry.intrinsics import CameraIntrinsics
@@ -14,6 +15,11 @@ from app.geometry.points import Points3D
 from app.geometry.result import GeometryResult
 from app.inference.base import InferenceModel
 from app.main import create_app
+
+
+class StubAppearanceModel(InferenceModel[np.ndarray, AppearanceResult]):
+    def run(self, input_data: np.ndarray) -> AppearanceResult:
+        raise AssertionError("Appearance inference should not be called in geometry API tests.")
 
 
 class StubGeometryModel(InferenceModel[np.ndarray, GeometryResult]):
@@ -51,7 +57,11 @@ def _encode_png(width: int, height: int) -> bytes:
 def test_infer_caches_result_and_serves_binary_maps(tmp_path: Path) -> None:
     model = StubGeometryModel()
     settings = Settings(cache_dir=tmp_path / "cache", max_image_size=8)
-    app = create_app(settings=settings, inference_model=model)
+    app = create_app(
+        settings=settings,
+        inference_model=model,
+        appearance_model=StubAppearanceModel(),
+    )
     png_bytes = _encode_png(16, 12)
 
     with TestClient(app) as client:
@@ -129,7 +139,11 @@ def test_infer_caches_result_and_serves_binary_maps(tmp_path: Path) -> None:
 def test_invalid_upload_and_missing_records(tmp_path: Path) -> None:
     model = StubGeometryModel()
     settings = Settings(cache_dir=tmp_path / "cache")
-    app = create_app(settings=settings, inference_model=model)
+    app = create_app(
+        settings=settings,
+        inference_model=model,
+        appearance_model=StubAppearanceModel(),
+    )
 
     with TestClient(app) as client:
         bad = client.post(

@@ -4,7 +4,6 @@ import math
 import threading
 from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFile
 import numpy as np
-from PIL import UnidentifiedImageError
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
@@ -21,7 +20,13 @@ from ..config import Settings
 from ..geometry.result import GeometryResult
 from ..geometry.surface_selector import SurfaceSelectionOutcome, SurfaceSelector
 from ..inference.memory import is_cuda_oom, prepare_model_for_inference
-from ..utils.image import decode_image_bytes
+from ..utils.image import (
+    ImageTooLargeError,
+    InvalidImageError,
+    decode_image_bytes,
+    validate_image_pixel_count,
+)
+from .uploads import read_image_upload
 
 router = APIRouter(prefix="/api/geometry", tags=["geometry"])
 
@@ -51,13 +56,19 @@ def _infer_and_cache(
     image_sha256: str,
     params: InferenceParams,
     raw_bytes: bytes,
+    max_image_pixels: int,
 ) -> tuple[dict[str, object], bool]:
-    decoded = decode_image_bytes(raw_bytes, max_image_size=params.max_image_size)
-
     with lock:
         existing = cache.get_metadata(cache_id)
         if existing is not None:
+            validate_image_pixel_count(
+                existing.original_width, existing.original_height, max_image_pixels,
+            )
             return (asdict(existing), True)
+
+        decoded = decode_image_bytes(
+            raw_bytes, max_image_size=params.max_image_size, max_pixels=max_image_pixels,
+        )
 
         prepare_model_for_inference(
             active_model=model,
@@ -78,11 +89,8 @@ def _infer_and_cache(
 
 @router.post("/infer")
 async def infer_geometry(request: Request, file: UploadFile = File(...)) -> dict[str, object]:
-    raw_bytes = await file.read()
-    if not raw_bytes:
-        raise HTTPException(status_code=400, detail="Uploaded image file is empty.")
-
     settings: Settings = request.app.state.settings
+    raw_bytes = await read_image_upload(file, settings.max_upload_bytes)
     cache: GeometryCache = request.app.state.geometry_cache
     model = request.app.state.inference_model
     peer_model = getattr(request.app.state, "appearance_model", None)
@@ -92,11 +100,14 @@ async def infer_geometry(request: Request, file: UploadFile = File(...)) -> dict
     image_sha256 = compute_image_sha256(raw_bytes)
     cache_id = build_cache_key(image_sha256, params)
 
-    cached_meta = cache.get_metadata(cache_id)
-    if cached_meta is not None:
-        return {**asdict(cached_meta), "cached": True}
-
+    cached_meta = await run_in_threadpool(cache.get_metadata, cache_id)
     try:
+        if cached_meta is not None:
+            validate_image_pixel_count(
+                cached_meta.original_width, cached_meta.original_height, settings.max_image_pixels,
+            )
+            return {**asdict(cached_meta), "cached": True}
+
         metadata_dict, was_cached = await run_in_threadpool(
             _infer_and_cache,
             model,
@@ -108,8 +119,11 @@ async def infer_geometry(request: Request, file: UploadFile = File(...)) -> dict
             image_sha256,
             params,
             raw_bytes,
+            settings.max_image_pixels,
         )
-    except (ValueError, UnidentifiedImageError, OSError) as exc:
+    except ImageTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    except InvalidImageError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         if is_cuda_oom(exc):
