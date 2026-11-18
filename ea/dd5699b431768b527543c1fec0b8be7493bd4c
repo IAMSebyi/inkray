@@ -1,0 +1,26 @@
+frontend/src/geometry/curvedBrushSolver.ts
+  h_af746f1f05a814 389-391,393-402,404-408,591-617,619-629,631-633,635-636
+  h_af746f1f05a814 403,618
+frontend/src/painting/planeVisibility.ts
+  h_af746f1f05a814 320-339,341-372,375-376,386-387,389-407,410-432,434-439
+  h_af746f1f05a814 340,388,433
+frontend/src/geometry/imageMeshBuilder.ts
+  h_af746f1f05a814 3,8,14-144,159,162-169,172-186,189-201,203-353,355-360,365,373,432-433
+  h_af746f1f05a814 170,431
+frontend/src/painting/imageSpacePaint.ts
+  h_af746f1f05a814 44-45,49-67,277,289-302,326-327,366-368,378,417-418,429,492,526,533,553,576
+  h_af746f1f05a814 303-304,419
+frontend/src/geometry/imageMeshBuilder.test.ts
+  h_af746f1f05a814 121-160
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "eadd5699b431768b527543c1fec0b8be7493bd4c",
+  "prompts": {},
+  "humans": {
+    "h_af746f1f05a814": {
+      "author": "Iorga Sebastian George <sebyiorga95@yahoo.com>"
+    }
+  }
+}
