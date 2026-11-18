@@ -1,0 +1,19 @@
+frontend/src/editor/PointCloudViewer.tsx
+  h_af746f1f05a814 13-59,76,80-82,85-88,109-133,140-145,150-172,175-176,188-191,193,196,205,207-209,213-214,241-242,244-263,265-266,268-286,288-298,300-305,318,322,326-329,332,337,341-364,366-398,400,405,414,441-442,445,450,484,487
+  h_af746f1f05a814 134-139,146-149,206,365,411-413,415
+frontend/src/editor/pointCloudPicking.test.ts
+  h_af746f1f05a814 1-104
+frontend/src/editor/pointCloudPicking.ts
+  h_af746f1f05a814 1-172
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "818001f38e91e5fa5e769ca1de3d6ec93cc8d00a",
+  "prompts": {},
+  "humans": {
+    "h_af746f1f05a814": {
+      "author": "Iorga Sebastian George <sebyiorga95@yahoo.com>"
+    }
+  }
+}
