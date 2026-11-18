@@ -1,6 +1,5 @@
 import {
   Anchor,
-  Box,
   Copy,
   Eraser,
   Eye,
@@ -18,14 +17,15 @@ import {
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { getCheckerboardTileCanvas } from '../editor/canvasRenderer';
-import { computeFovYDegrees } from '../editor/pointCloudBuilder';
 import { useEditor } from '../hooks/useEditor';
 import { ARTWORK_DRAG_MIME, type Artwork, rasterizeArtworkRgba } from '../painting/artwork';
 import { type ArtworkPlacement, normalizeAngleRad } from '../painting/artworkPlacement';
-import { calibrateShadingScale } from '../painting/colorSpace';
+import { getAppearanceShadingCalibration } from '../painting/intrinsicLighting';
 import { PaintDocument } from '../painting/paintDocument';
-import type { PaintMode } from '../types/editor';
+import { APPEARANCE_MODELS, type PaintMode } from '../types/editor';
 import { formatAspectRatio, formatDimensions, formatFileSize } from '../utils/format';
+import { ModelSelect } from './ModelSelect';
+import { SceneGeometrySection } from './SceneGeometrySection';
 
 const SCENE_OBJECT_DRAG_MIME = 'application/x-inkray-scene-object-index';
 
@@ -104,8 +104,9 @@ export function RightSidebar() {
     toggleBrushObjectVisibility,
     removeBrushObject,
     reorderSceneObject,
-    generateGeometry,
-    cancelGeometry,
+    appearanceModel,
+    modelAvailability,
+    setAppearanceModel,
     generateAppearance,
     cancelAppearance,
     setActiveTool,
@@ -128,9 +129,9 @@ export function RightSidebar() {
 
   const metadata = state.image?.metadata ?? null;
   const geometry = state.geometry.data;
-  const geometryStatus = state.geometry.status;
   const appearance = state.appearance.data;
   const appearanceStatus = state.appearance.status;
+  const compositingMode = appearance && !appearance.shading ? 'flat' : state.paint.paintMode;
 
   const isArtworkMode = state.workspaceMode === 'artwork';
   const activeArtwork = PaintDocument.getActiveArtwork(state.paint);
@@ -169,19 +170,6 @@ export function RightSidebar() {
     }
   }
 
-  let geometryBadge = 'Idle';
-  let geometryBadgeClass = 'inspector-badge inspector-badge-muted';
-  if (geometryStatus === 'loading') {
-    geometryBadge = 'Running';
-    geometryBadgeClass = 'inspector-badge inspector-badge-accent';
-  } else if (geometryStatus === 'ready' && geometry) {
-    geometryBadge = geometry.metadata.cached ? 'Cached' : 'Ready';
-    geometryBadgeClass = 'inspector-badge';
-  } else if (geometryStatus === 'error') {
-    geometryBadge = 'Error';
-    geometryBadgeClass = 'inspector-badge inspector-badge-danger';
-  }
-
   let appearanceBadge = 'Idle';
   let appearanceBadgeClass = 'inspector-badge inspector-badge-muted';
   if (appearanceStatus === 'loading') {
@@ -196,31 +184,8 @@ export function RightSidebar() {
   }
 
   const sceneCalibration = useMemo(() => {
-    if (!appearance) {
-      return null;
-    }
-    return calibrateShadingScale({
-      linearReference: appearance.linearReference,
-      albedo: appearance.albedo,
-      shading: appearance.shading,
-      residual: appearance.residual,
-      appearanceWidth: appearance.metadata.appearance_width,
-      appearanceHeight: appearance.metadata.appearance_height,
-    });
+    return appearance ? getAppearanceShadingCalibration(appearance) : null;
   }, [appearance]);
-
-  const totalInferencePixels = geometry
-    ? geometry.metadata.inference_width * geometry.metadata.inference_height
-    : 0;
-  const validCoveragePct =
-    geometry && totalInferencePixels > 0
-      ? ((geometry.metadata.valid_pixel_count / totalInferencePixels) * 100).toFixed(1)
-      : null;
-  const fovYDegrees = geometry ? computeFovYDegrees(geometry.metadata.intrinsics) : null;
-  const depthRangeLabel =
-    geometry?.metadata.depth_range !== null && geometry?.metadata.depth_range !== undefined
-      ? `${geometry.metadata.depth_range[0].toFixed(2)} - ${geometry.metadata.depth_range[1].toFixed(2)}`
-      : 'Unavailable';
 
   return (
     <aside className="right-sidebar" aria-label="Inspector">
@@ -941,105 +906,7 @@ export function RightSidebar() {
         </section>
       )}
 
-      <section className="inspector-section">
-        <div className="inspector-header">
-          <h2 className="inspector-title">
-            <Box size={13} strokeWidth={1.75} />
-            <span>Scene Geometry</span>
-          </h2>
-          <span className={geometryBadgeClass}>{geometryBadge}</span>
-        </div>
-
-        {!metadata ? (
-          <p className="inspector-empty-note">
-            Import an image first to infer monocular depth, surface normals, and 3D points.
-          </p>
-        ) : (
-          <div className="inspector-content">
-            {geometryStatus === 'error' && state.geometry.error && (
-              <p className="inspector-error-note" role="alert">
-                {state.geometry.error}
-              </p>
-            )}
-
-            {geometryStatus === 'loading' && (
-              <p className="inspector-empty-note">
-                Running MoGe-3 inference on the backend. You can cancel or switch images safely.
-              </p>
-            )}
-
-            {geometry && (
-              <dl className="metadata-grid">
-                <dt>Model</dt>
-                <dd className="mono" title={geometry.metadata.model_id}>
-                  {geometry.metadata.model_id}
-                </dd>
-
-                <dt>Source</dt>
-                <dd className="mono">{geometry.metadata.cached ? 'Disk cache' : 'Inferred'}</dd>
-
-                <dt>Inference</dt>
-                <dd className="mono">
-                  {formatDimensions(
-                    geometry.metadata.inference_width,
-                    geometry.metadata.inference_height,
-                  )}
-                </dd>
-
-                <dt>Valid Pixels</dt>
-                <dd className="mono">
-                  {geometry.metadata.valid_pixel_count.toLocaleString()}
-                  {validCoveragePct !== null ? ` (${validCoveragePct}%)` : ''}
-                </dd>
-
-                <dt>Depth Z</dt>
-                <dd className="mono">{depthRangeLabel}</dd>
-
-                <dt>Est. FOV Y</dt>
-                <dd className="mono">
-                  {fovYDegrees !== null ? `${fovYDegrees.toFixed(1)} deg` : '—'}
-                </dd>
-
-                <dt>Normals</dt>
-                <dd className="mono">{geometry.metadata.has_normals ? 'Available' : 'None'}</dd>
-              </dl>
-            )}
-
-            {geometryStatus === 'loading' ? (
-              <button
-                type="button"
-                className="sidebar-action-button toolbar-button-busy"
-                onClick={(e) => {
-                  e.currentTarget.blur();
-                  cancelGeometry();
-                }}
-              >
-                <X size={13} strokeWidth={1.75} />
-                <span>Stop Waiting</span>
-              </button>
-            ) : (
-              <button
-                type="button"
-                className="sidebar-action-button"
-                onClick={(e) => {
-                  e.currentTarget.blur();
-                  void generateGeometry();
-                }}
-                disabled={state.isLoading}
-              >
-                <Box size={13} strokeWidth={1.75} />
-                <span>
-                  {geometryStatus === 'error'
-                    ? 'Retry Geometry'
-                    : geometry
-                      ? 'Regenerate Geometry'
-                      : 'Generate Geometry'}
-                </span>
-              </button>
-            )}
-          </div>
-        )}
-      </section>
+      <SceneGeometrySection />
 
       <section className="inspector-section">
         <div className="inspector-header">
@@ -1057,16 +924,23 @@ export function RightSidebar() {
           </p>
         ) : (
           <div className="inspector-content">
-            {appearanceStatus === 'error' && state.appearance.error && (
+            <ModelSelect
+              label="Appearance Model"
+              models={APPEARANCE_MODELS}
+              value={appearanceModel}
+              unavailable={modelAvailability?.unavailable}
+              disabled={appearanceStatus === 'loading'}
+              onChange={setAppearanceModel}
+            />
+            {state.appearance.error && (
               <p className="inspector-error-note" role="alert">
                 {state.appearance.error}
               </p>
             )}
 
             {appearanceStatus === 'loading' && (
-              <p className="inspector-empty-note">
-                Running Marigold IID Lighting on the backend. This may briefly offload other GPU
-                models to stay within VRAM limits.
+              <p className="inspector-empty-note" role="status">
+                Running {APPEARANCE_MODELS[appearanceModel]} on the backend.
               </p>
             )}
 
@@ -1091,27 +965,22 @@ export function RightSidebar() {
                 <dt>Space</dt>
                 <dd className="mono">{appearance.metadata.prediction_space}</dd>
 
-                <dt>Shading Scale</dt>
+                <dt>{appearance.derivedShading ? 'Shading' : 'Shading Scale'}</dt>
                 <dd className="mono">
-                  {sceneCalibration
-                    ? sceneCalibration.isReliable
-                      ? `${sceneCalibration.scale.toFixed(2)}x`
-                      : 'Fallback (Flat)'
-                    : '—'}
+                  {appearance.derivedShading
+                    ? 'Derived from albedo'
+                    : sceneCalibration
+                      ? sceneCalibration.isReliable
+                        ? `${sceneCalibration.scale.toFixed(2)}x`
+                        : 'Fallback (Flat)'
+                      : '—'}
                 </dd>
               </dl>
             )}
 
             <div className="inspector-controls-stack">
               <div className="inspector-control-row">
-                <span className="inspector-control-header">
-                  <span>Paint Compositing</span>
-                  <span className="mono">
-                    {!appearance && state.paint.paintMode !== 'flat'
-                      ? `${state.paint.paintMode} (awaiting maps)`
-                      : state.paint.paintMode}
-                  </span>
-                </span>
+                <span>Paint Compositing</span>
                 <div
                   className="segmented-control sidebar-mode-control"
                   role="group"
@@ -1122,21 +991,30 @@ export function RightSidebar() {
                       key={option.mode}
                       type="button"
                       className={`sidebar-mode-button ${
-                        state.paint.paintMode === option.mode ? 'is-active' : ''
+                        compositingMode === option.mode ? 'is-active' : ''
                       }`}
+                      aria-pressed={compositingMode === option.mode}
                       onClick={(e) => {
                         e.currentTarget.blur();
                         setPaintMode(option.mode);
                       }}
                       title={option.title}
+                      disabled={
+                        option.mode !== 'flat' && appearance !== null && !appearance.shading
+                      }
                     >
                       {option.label}
                     </button>
                   ))}
                 </div>
+                {!appearance && appearanceStatus !== 'loading' && (
+                  <p className="inspector-empty-note">
+                    Generate appearance to use Shading and Texture.
+                  </p>
+                )}
               </div>
 
-              {state.paint.paintMode === 'texture' && (
+              {compositingMode === 'texture' && (
                 <label className="inspector-control-row">
                   <span className="inspector-control-header">
                     <span>Texture Detail</span>

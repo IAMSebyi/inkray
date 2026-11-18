@@ -1,4 +1,11 @@
-import type { GeometryData, GeometryMetadata, LoadedImage, Point2D } from '../types/editor';
+import type {
+  GeometryData,
+  GeometryMetadata,
+  GeometryModel,
+  LoadedImage,
+  NormalModel,
+  Point2D,
+} from '../types/editor';
 import {
   createDepthPreviewCanvas,
   createMaskPreviewCanvas,
@@ -7,23 +14,7 @@ import {
 } from '../editor/geometryVisualizations';
 import type { Vec3Tuple } from '../geometry/geometryAccess';
 import { PlaneFrame, type SurfaceSelectionOutcome } from '../geometry/planeFrame';
-
-const API_BASE = ((import.meta.env.VITE_API_BASE_URL as string | undefined) ?? '').replace(
-  /\/+$/,
-  '',
-);
-
-async function parseErrorMessage(response: Response): Promise<string> {
-  try {
-    const body = (await response.json()) as { detail?: unknown };
-    if (typeof body.detail === 'string' && body.detail.trim() !== '') {
-      return body.detail;
-    }
-  } catch {
-    // Ignore non-JSON error bodies.
-  }
-  return `Request failed with HTTP ${response.status}.`;
-}
+import { API_BASE, parseErrorMessage } from './backend';
 
 async function fetchBinaryMap(
   geometryId: string,
@@ -40,14 +31,31 @@ async function fetchBinaryMap(
   return response.arrayBuffer();
 }
 
+export interface GeometryRequestOptions {
+  normalModel?: NormalModel | null;
+  smoothIterations?: number;
+}
+
 export async function inferGeometryMetadata(
   file: File,
+  model: GeometryModel | undefined,
   signal?: AbortSignal,
+  options?: GeometryRequestOptions,
 ): Promise<GeometryMetadata> {
   const formData = new FormData();
   formData.append('file', file);
 
-  const response = await fetch(`${API_BASE}/api/geometry/infer`, {
+  const params = new URLSearchParams();
+  if (model) params.set('model', model);
+  if (options?.normalModel) {
+    params.set('refine_normals', 'true');
+    params.set('normal_model', options.normalModel);
+  }
+  if (options?.smoothIterations && options.smoothIterations > 0) {
+    params.set('smooth_iterations', String(options.smoothIterations));
+  }
+  const query = params.size > 0 ? `?${params}` : '';
+  const response = await fetch(`${API_BASE}/api/geometry/infer${query}`, {
     method: 'POST',
     body: formData,
     signal,
@@ -62,9 +70,11 @@ export async function inferGeometryMetadata(
 
 export async function fetchGeometryForImage(
   image: LoadedImage,
+  model: GeometryModel | undefined,
   signal?: AbortSignal,
+  options?: GeometryRequestOptions,
 ): Promise<GeometryData> {
-  const metadata = await inferGeometryMetadata(image.sourceFile, signal);
+  const metadata = await inferGeometryMetadata(image.sourceFile, model, signal, options);
   const { inference_width: width, inference_height: height, id } = metadata;
   const pixelCount = width * height;
 
@@ -102,7 +112,7 @@ export async function fetchGeometryForImage(
 
   return {
     imageId: image.id,
-    metadata,
+    metadata: { ...metadata, model: metadata.model ?? model },
     depth,
     points,
     mask,

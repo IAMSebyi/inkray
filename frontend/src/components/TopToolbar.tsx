@@ -16,12 +16,13 @@ import {
 import { useEditor } from '../hooks/useEditor';
 import { ArtworkModel } from '../painting/artwork';
 import { PaintDocument } from '../painting/paintDocument';
-import type { ViewMode } from '../types/editor';
+import { APPEARANCE_MODELS, GEOMETRY_MODELS, type ViewMode } from '../types/editor';
 import { formatZoomPercent } from '../utils/format';
 
 const VIEW_MODE_OPTIONS: Array<{ mode: ViewMode; label: string; title: string }> = [
   { mode: 'rgb', label: 'RGB', title: 'Original color image' },
   { mode: 'depth', label: 'Depth', title: 'Inferred depth map' },
+  { mode: 'depth-difference', label: 'Diff', title: 'Scale-aligned depth difference' },
   { mode: 'normals', label: 'Normals', title: 'Inferred surface normals' },
   { mode: 'mask', label: 'Mask', title: 'Valid geometry mask' },
   { mode: 'pointcloud', label: '3D', title: 'Interactive 3D point cloud' },
@@ -70,8 +71,11 @@ export function TopToolbar() {
     zoomIn,
     zoomOut,
     setViewMode,
+    geometryModel,
+    geometryComparison,
     generateGeometry,
     cancelGeometry,
+    appearanceModel,
     generateAppearance,
     cancelAppearance,
     setPaintOverlayOptions,
@@ -86,7 +90,8 @@ export function TopToolbar() {
   const geometryData = state.geometry.data;
   const hasGeometry = geometryData !== null;
   const isGeneratingGeometry = state.geometry.status === 'loading';
-  const hasAppearance = state.appearance.data !== null;
+  const appearanceData = state.appearance.data;
+  const hasAppearance = appearanceData !== null;
   const isGeneratingAppearance = state.appearance.status === 'loading';
   const isPointCloudMode =
     !isArtworkMode &&
@@ -160,7 +165,7 @@ export function TopToolbar() {
               })
             }
             disabled={!hasImage || state.isLoading}
-            title="Infer 3D geometry with MoGe-3"
+            title={`Infer 3D geometry with ${GEOMETRY_MODELS[geometryModel]}`}
           >
             <Box size={14} strokeWidth={1.75} />
             <span>
@@ -189,7 +194,7 @@ export function TopToolbar() {
               })
             }
             disabled={!hasImage || state.isLoading}
-            title="Estimate albedo, diffuse shading, and residual with Marigold IID"
+            title={`Estimate appearance with ${APPEARANCE_MODELS[appearanceModel]}`}
           >
             <SunMedium size={14} strokeWidth={1.75} />
             <span>
@@ -284,13 +289,16 @@ export function TopToolbar() {
       <div className="toolbar-group toolbar-viewport-controls">
         <div className="segmented-control view-mode-control" role="group" aria-label="View mode">
           {VIEW_MODE_OPTIONS.map((option) => {
-            const isAppearanceMode =
-              option.mode === 'albedo' || option.mode === 'shading' || option.mode === 'residual';
+            const { mode } = option;
+            const isAppearanceMode = mode === 'albedo' || mode === 'shading' || mode === 'residual';
             const optionDisabled =
               isArtworkMode ||
               !hasImage ||
-              (isAppearanceMode ? !hasAppearance : option.mode !== 'rgb' && !hasGeometry) ||
-              (option.mode === 'normals' && !geometryData?.previews.normals);
+              (isAppearanceMode
+                ? !appearanceData?.previews[mode]
+                : mode !== 'rgb' && !hasGeometry) ||
+              (mode === 'normals' && !geometryData?.previews.normals);
+            const comparisonUnavailable = mode === 'depth-difference' && !geometryComparison;
 
             return (
               <button
@@ -298,7 +306,7 @@ export function TopToolbar() {
                 type="button"
                 className={`view-mode-button ${state.viewMode === option.mode ? 'is-active' : ''}`}
                 onClick={(e) => blurAfterAction(e, () => setViewMode(option.mode))}
-                disabled={optionDisabled}
+                disabled={optionDisabled || comparisonUnavailable}
                 aria-pressed={state.viewMode === option.mode}
                 title={option.title}
               >

@@ -47,6 +47,8 @@ export interface EditorState {
   activeTool: EditorTool;
   viewMode: ViewMode;
   geometry: GeometryState;
+  geometryResults: GeometryData[];
+  comparisonGeometryId: string | null;
   appearance: AppearanceState;
   paint: PaintDocumentState;
 }
@@ -67,6 +69,8 @@ export type EditorAction =
   | { type: 'GEOMETRY_SUCCESS'; data: GeometryData }
   | { type: 'GEOMETRY_ERROR'; imageId: string; message: string }
   | { type: 'GEOMETRY_CANCEL' }
+  | { type: 'SET_GEOMETRY_COMPARISON'; id: string }
+  | { type: 'ACTIVATE_GEOMETRY'; id: string }
   | { type: 'APPEARANCE_START' }
   | { type: 'APPEARANCE_SUCCESS'; data: AppearanceData }
   | { type: 'APPEARANCE_ERROR'; imageId: string; message: string }
@@ -128,6 +132,15 @@ const IDLE_GEOMETRY: GeometryState = {
   error: null,
 };
 
+export function hasGeometryDependentEdits(paint: PaintDocumentState): boolean {
+  return [paint, ...paint.undoStack, ...paint.redoStack].some(
+    (snapshot) =>
+      snapshot.surfaces.length > 0 ||
+      snapshot.imageStrokes.some((stroke) => stroke.layer === 'curved') ||
+      snapshot.artworkPlacements.some((placement) => placement.mapping.type !== 'image-2d'),
+  );
+}
+
 const IDLE_APPEARANCE: AppearanceState = {
   status: 'idle',
   data: null,
@@ -146,6 +159,8 @@ export const initialEditorState: EditorState = {
   activeTool: 'pointer',
   viewMode: 'rgb',
   geometry: IDLE_GEOMETRY,
+  geometryResults: [],
+  comparisonGeometryId: null,
   appearance: IDLE_APPEARANCE,
   paint: PaintDocument.createInitial(),
 };
@@ -191,6 +206,8 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
         activeTool: resetPaintToolOnReset(state.activeTool),
         viewMode: 'rgb',
         geometry: IDLE_GEOMETRY,
+        geometryResults: [],
+        comparisonGeometryId: null,
         appearance: IDLE_APPEARANCE,
         paint: PaintDocument.createInitial(
           state.paint.brushConfig,
@@ -344,7 +361,7 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
       }
       if (action.mode === 'albedo' || action.mode === 'shading' || action.mode === 'residual') {
         const readyAppearance = state.appearance.data;
-        if (!readyAppearance) {
+        if (!readyAppearance?.previews[action.mode]) {
           return state;
         }
         return {
@@ -354,6 +371,9 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
       }
       const readyData = state.geometry.data;
       if (!readyData) {
+        return state;
+      }
+      if (action.mode === 'depth-difference' && !state.comparisonGeometryId) {
         return state;
       }
       if (action.mode === 'normals' && !readyData.previews.normals) {
@@ -381,39 +401,66 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
       };
     }
 
-    case 'GEOMETRY_SUCCESS':
+    case 'GEOMETRY_SUCCESS': {
       // Ignore stale responses if the user replaced the image before completion.
       if (!state.image || state.image.id !== action.data.imageId) {
         return state;
       }
+      const id = action.data.metadata.id;
+      const active = state.geometry.data;
+      return {
+        ...state,
+        geometryResults: [
+          ...state.geometryResults.filter((data) => data.metadata.id !== id),
+          action.data,
+        ],
+        comparisonGeometryId: active && active.metadata.id !== id ? id : state.comparisonGeometryId,
+        geometry: {
+          status: 'ready',
+          data: !active || active.metadata.id === id ? action.data : active,
+          error: null,
+        },
+      };
+    }
+
+    case 'SET_GEOMETRY_COMPARISON': {
       if (
-        state.geometry.data &&
-        state.geometry.data.metadata.id !== action.data.metadata.id &&
-        [state.paint, ...state.paint.undoStack, ...state.paint.redoStack].some(
-          (snapshot) =>
-            snapshot.surfaces.length > 0 ||
-            snapshot.imageStrokes.some((stroke) => stroke.layer === 'curved') ||
-            snapshot.artworkPlacements.some((placement) => placement.mapping.type !== 'image-2d'),
-        )
+        action.id === state.geometry.data?.metadata.id ||
+        !state.geometryResults.some((data) => data.metadata.id === action.id)
       ) {
+        return state;
+      }
+      return { ...state, comparisonGeometryId: action.id };
+    }
+
+    case 'ACTIVATE_GEOMETRY': {
+      const active = state.geometry.data;
+      const candidate = state.geometryResults.find((data) => data.metadata.id === action.id);
+      if (state.geometry.status === 'loading' || !candidate || candidate === active) {
+        return state;
+      }
+      if (active && hasGeometryDependentEdits(state.paint)) {
         return {
           ...state,
           geometry: {
             ...state.geometry,
-            status: 'error',
             error:
-              'The new reconstruction is incompatible with existing surface edits. Replace the photo to start a new reconstruction.',
+              'Existing surface edits use the active reconstruction. Reimport the photo to start new surface edits.',
           },
         };
       }
       return {
         ...state,
+        activeTool: resetGeometrySelectionTool(state.activeTool),
+        viewMode: 'rgb',
+        comparisonGeometryId: active?.metadata.id ?? null,
         geometry: {
           status: 'ready',
-          data: action.data,
+          data: candidate,
           error: null,
         },
       };
+    }
 
     case 'GEOMETRY_ERROR':
       if (!state.image || state.image.id !== action.imageId) {
@@ -422,7 +469,7 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
       return {
         ...state,
         geometry: {
-          status: 'error',
+          status: state.geometry.data ? 'ready' : 'error',
           data: state.geometry.data,
           error: action.message,
         },
@@ -464,6 +511,11 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
       }
       return {
         ...state,
+        viewMode:
+          (state.viewMode === 'shading' || state.viewMode === 'residual') &&
+          !action.data.previews[state.viewMode]
+            ? 'rgb'
+            : state.viewMode,
         appearance: {
           status: 'ready',
           data: action.data,

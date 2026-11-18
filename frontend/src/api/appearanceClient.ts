@@ -5,24 +5,14 @@ import {
 } from '../editor/appearanceVisualizations';
 import { extractImageColorsAtSize } from '../editor/geometryVisualizations';
 import { rgbaUint8ToLinearRgb } from '../painting/colorSpace';
-import type { AppearanceData, AppearanceMetadata, LoadedImage } from '../types/editor';
-
-const API_BASE = ((import.meta.env.VITE_API_BASE_URL as string | undefined) ?? '').replace(
-  /\/+$/,
-  '',
-);
-
-async function parseErrorMessage(response: Response): Promise<string> {
-  try {
-    const body = (await response.json()) as { detail?: unknown };
-    if (typeof body.detail === 'string' && body.detail.trim() !== '') {
-      return body.detail;
-    }
-  } catch {
-    // Ignore non-JSON error bodies.
-  }
-  return `Request failed with HTTP ${response.status}.`;
-}
+import { deriveLighting } from '../painting/intrinsicLighting';
+import type {
+  AppearanceData,
+  AppearanceMetadata,
+  AppearanceModel,
+  LoadedImage,
+} from '../types/editor';
+import { API_BASE, parseErrorMessage } from './backend';
 
 async function fetchAppearanceMap(
   appearanceId: string,
@@ -41,16 +31,20 @@ async function fetchAppearanceMap(
 
 export async function inferAppearanceMetadata(
   file: File,
+  model: AppearanceModel,
   signal?: AbortSignal,
 ): Promise<AppearanceMetadata> {
   const formData = new FormData();
   formData.append('file', file);
 
-  const response = await fetch(`${API_BASE}/api/appearance/infer`, {
-    method: 'POST',
-    body: formData,
-    signal,
-  });
+  const response = await fetch(
+    `${API_BASE}/api/appearance/infer?model=${encodeURIComponent(model)}`,
+    {
+      method: 'POST',
+      body: formData,
+      signal,
+    },
+  );
   if (!response.ok) {
     throw new Error(await parseErrorMessage(response));
   }
@@ -59,39 +53,44 @@ export async function inferAppearanceMetadata(
 
 export async function fetchAppearanceForImage(
   image: LoadedImage,
+  model: AppearanceModel,
   signal?: AbortSignal,
 ): Promise<AppearanceData> {
-  const metadata = await inferAppearanceMetadata(image.sourceFile, signal);
+  const metadata = await inferAppearanceMetadata(image.sourceFile, model, signal);
   const { appearance_width: width, appearance_height: height, id } = metadata;
   const expectedValues = width * height * 3;
 
   const [albedoBuf, shadingBuf, residualBuf] = await Promise.all([
     fetchAppearanceMap(id, 'albedo', signal),
-    fetchAppearanceMap(id, 'shading', signal),
-    fetchAppearanceMap(id, 'residual', signal),
+    metadata.arrays.shading ? fetchAppearanceMap(id, 'shading', signal) : null,
+    metadata.arrays.residual ? fetchAppearanceMap(id, 'residual', signal) : null,
   ]);
 
   const albedo = new Float32Array(albedoBuf);
-  const shading = new Float32Array(shadingBuf);
-  const residual = new Float32Array(residualBuf);
+  let shading = shadingBuf ? new Float32Array(shadingBuf) : null;
+  let residual = residualBuf ? new Float32Array(residualBuf) : null;
 
   if (albedo.length !== expectedValues) {
     throw new Error(`Expected ${expectedValues} albedo values, received ${albedo.length}.`);
   }
-  if (shading.length !== expectedValues) {
+  if (shading && shading.length !== expectedValues) {
     throw new Error(`Expected ${expectedValues} shading values, received ${shading.length}.`);
   }
-  if (residual.length !== expectedValues) {
+  if (residual && residual.length !== expectedValues) {
     throw new Error(`Expected ${expectedValues} residual values, received ${residual.length}.`);
   }
 
   const refSrgbRgba = extractImageColorsAtSize(image.element, width, height);
   const linearReference = rgbaUint8ToLinearRgb(refSrgbRgba);
+  const derivedShading = !shading && !residual && metadata.prediction_space === 'linear';
+  if (derivedShading) {
+    ({ shading, residual } = deriveLighting(linearReference, albedo, width, height));
+  }
 
   const previews = {
     albedo: createAlbedoPreviewCanvas(albedo, width, height),
-    shading: createShadingPreviewCanvas(shading, width, height),
-    residual: createResidualPreviewCanvas(residual, width, height),
+    shading: shading ? createShadingPreviewCanvas(shading, width, height) : null,
+    residual: residual ? createResidualPreviewCanvas(residual, width, height) : null,
   };
 
   return {
@@ -101,6 +100,7 @@ export async function fetchAppearanceForImage(
     shading,
     residual,
     linearReference,
+    derivedShading,
     previews,
   };
 }

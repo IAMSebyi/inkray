@@ -113,6 +113,43 @@ function createStubAppearance(imageId: string): AppearanceData {
 }
 
 describe('editorReducer', () => {
+  it('keeps albedo available when an appearance result has no lighting maps', () => {
+    const image = createStubImage('scene', 24, 24);
+    const previous = createStubAppearance(image.id);
+    const data = {
+      ...previous,
+      shading: null,
+      residual: null,
+      previews: { ...previous.previews, shading: null, residual: null },
+    };
+    let state = editorReducer(initialEditorState, { type: 'IMPORT_SUCCESS', image });
+    state = editorReducer(state, { type: 'APPEARANCE_SUCCESS', data: previous });
+    state = editorReducer(state, { type: 'APPEARANCE_START' });
+    state = editorReducer(state, { type: 'SET_VIEW_MODE', mode: 'shading' });
+    state = editorReducer(state, { type: 'APPEARANCE_SUCCESS', data });
+    expect(state.viewMode).toBe('rgb');
+    state = editorReducer(state, { type: 'SET_VIEW_MODE', mode: 'albedo' });
+    expect(state.viewMode).toBe('albedo');
+    expect(editorReducer(state, { type: 'SET_VIEW_MODE', mode: 'residual' })).toBe(state);
+  });
+
+  it('keeps the active geometry until the user accepts a compared result', () => {
+    const image = createStubImage('scene', 24, 24);
+    const active = createStubGeometry(image.id);
+    const candidate = { ...active, metadata: { ...active.metadata, id: 'depth-pro' } };
+    let state = editorReducer(initialEditorState, { type: 'IMPORT_SUCCESS', image });
+    state = editorReducer(state, { type: 'GEOMETRY_SUCCESS', data: active });
+    state = editorReducer(state, { type: 'GEOMETRY_SUCCESS', data: candidate });
+    expect(state.geometry.data).toBe(active);
+    expect(state.comparisonGeometryId).toBe(candidate.metadata.id);
+    state = editorReducer(state, { type: 'SET_VIEW_MODE', mode: 'depth-difference' });
+    expect(state.viewMode).toBe('depth-difference');
+    state = editorReducer(state, { type: 'ACTIVATE_GEOMETRY', id: candidate.metadata.id });
+    expect(state.geometry.data).toBe(candidate);
+    expect(state.comparisonGeometryId).toBe(active.metadata.id);
+    expect(state.viewMode).toBe('rgb');
+  });
+
   it('fits and centers newly imported images and replaces cleanly', () => {
     let state = editorReducer(initialEditorState, {
       type: 'SET_VIEWPORT_SIZE',
@@ -609,5 +646,8 @@ it('keeps the geometry used by existing surface edits when reconstruction settin
     data: { ...geometry, metadata: { ...geometry.metadata, id: 'different' } },
   });
   expect(state.geometry.data).toBe(geometry);
-  expect(state.geometry.error).toContain('incompatible');
+  expect(state.geometry.error).toBeNull();
+  state = editorReducer(state, { type: 'ACTIVATE_GEOMETRY', id: 'different' });
+  expect(state.geometry.data).toBe(geometry);
+  expect(state.geometry.error).toContain('Existing surface edits');
 });

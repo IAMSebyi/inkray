@@ -100,6 +100,7 @@ export function EditorViewport({
     brushEngineRef,
     imageBrushEngineRef,
     paintRendererRef,
+    geometryComparison,
     setViewportSize,
     setTransform,
     setViewMode,
@@ -122,6 +123,7 @@ export function EditorViewport({
   const cursorViewportPointRef = useRef<Point2D | null>(null);
   const renderRafRef = useRef<number | null>(null);
   const syncRafRef = useRef<number | null>(null);
+  const webGlDirtyRef = useRef(true);
   const panSessionRef = useRef<PanSession>({
     active: false,
     pointerId: null,
@@ -151,6 +153,7 @@ export function EditorViewport({
     viewMode: state.viewMode,
     activeTool: state.activeTool,
     geometry: state.geometry.data,
+    depthDifference: geometryComparison?.preview,
     appearance: state.appearance.data,
     paint: state.paint,
     isPanning,
@@ -165,6 +168,7 @@ export function EditorViewport({
     viewMode: state.viewMode,
     activeTool: state.activeTool,
     geometry: state.geometry.data,
+    depthDifference: geometryComparison?.preview,
     appearance: state.appearance.data,
     paint: state.paint,
     isPanning,
@@ -196,6 +200,7 @@ export function EditorViewport({
       viewMode,
       activeTool,
       geometry,
+      depthDifference,
       appearance,
       paint,
       isPanning: currentIsPanning,
@@ -216,7 +221,8 @@ export function EditorViewport({
       ? placementDragRef.current.previewPlacement
       : null;
 
-    if (viewMode === 'rgb' && image !== null && paintRenderer !== null) {
+    if (viewMode === 'rgb' && image !== null && paintRenderer !== null && webGlDirtyRef.current) {
+      webGlDirtyRef.current = false;
       paintRenderer.renderViewport({
         viewportSize,
         dpr: currentDpr,
@@ -284,6 +290,7 @@ export function EditorViewport({
       transform: liveTransformRef.current,
       viewMode,
       geometry,
+      depthDifference,
       appearance,
       borderOnly: usePaintWebGl,
       brushCursor,
@@ -298,6 +305,7 @@ export function EditorViewport({
     }
     const renderer = new PlanarPaintRenderer(host);
     paintRendererRef.current = renderer;
+    webGlDirtyRef.current = true;
     drawCanvasNow();
     return () => {
       renderer.dispose();
@@ -305,7 +313,7 @@ export function EditorViewport({
     };
   }, [drawCanvasNow, paintRendererRef]);
 
-  const scheduleCanvasRender = useCallback(() => {
+  const scheduleOverlayRender = useCallback(() => {
     if (renderRafRef.current !== null) {
       return;
     }
@@ -314,6 +322,11 @@ export function EditorViewport({
       drawCanvasNow();
     });
   }, [drawCanvasNow]);
+
+  const scheduleCanvasRender = useCallback(() => {
+    webGlDirtyRef.current = true;
+    scheduleOverlayRender();
+  }, [scheduleOverlayRender]);
 
   const scheduleTransformSync = useCallback(() => {
     if (syncRafRef.current !== null) {
@@ -336,6 +349,7 @@ export function EditorViewport({
       cursorStore.setSample(null);
       return;
     }
+    webGlDirtyRef.current = true;
     drawCanvasNow();
   }, [
     state.transform,
@@ -345,6 +359,7 @@ export function EditorViewport({
     state.viewMode,
     state.activeTool,
     state.geometry.data,
+    geometryComparison,
     state.appearance.data,
     state.paint,
     state.isExporting,
@@ -832,7 +847,7 @@ export function EditorViewport({
     } else {
       const { activeTool, viewMode } = latestRenderStateRef.current;
       if (viewMode === 'rgb' && (activeTool === 'brush' || activeTool === 'eraser')) {
-        scheduleCanvasRender();
+        scheduleOverlayRender();
       }
     }
 
@@ -938,7 +953,7 @@ export function EditorViewport({
     cursorViewportPointRef.current = null;
     if (!panSessionRef.current.active && !paintSessionRef.current.active) {
       cursorStore.setSample(null);
-      scheduleCanvasRender();
+      scheduleOverlayRender();
     }
   };
 

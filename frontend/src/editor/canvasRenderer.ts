@@ -350,6 +350,7 @@ export interface CanvasRenderParams {
   transform: ViewportTransform;
   viewMode?: Exclude<ViewMode, 'pointcloud' | 'mesh'>;
   geometry?: GeometryData | null;
+  depthDifference?: HTMLCanvasElement | null;
   appearance?: AppearanceData | null;
   borderOnly?: boolean;
   brushCursor?: BrushCursorPreview | null;
@@ -387,6 +388,7 @@ export function renderViewportCanvas(
     transform,
     viewMode = 'rgb',
     geometry = null,
+    depthDifference = null,
     appearance = null,
     borderOnly = false,
     brushCursor = null,
@@ -404,6 +406,11 @@ export function renderViewportCanvas(
 
   let drawSource: HTMLImageElement | HTMLCanvasElement = image.element;
   let showCheckerboard = image.metadata.formatLabel === 'PNG';
+
+  if (viewMode === 'depth-difference' && depthDifference) {
+    drawSource = depthDifference;
+    showCheckerboard = true;
+  }
 
   if (geometry) {
     if (viewMode === 'depth') {
@@ -423,10 +430,10 @@ export function renderViewportCanvas(
       drawSource = appearance.previews.albedo;
       showCheckerboard = false;
     } else if (viewMode === 'shading') {
-      drawSource = appearance.previews.shading;
+      drawSource = appearance.previews.shading ?? drawSource;
       showCheckerboard = false;
     } else if (viewMode === 'residual') {
-      drawSource = appearance.previews.residual;
+      drawSource = appearance.previews.residual ?? drawSource;
       showCheckerboard = false;
     }
   }
@@ -471,7 +478,7 @@ export function renderViewportCanvas(
     );
 
     // Switch to nearest-neighbor when zoomed in far enough to inspect individual pixels.
-    if (transform.zoom >= 3) {
+    if (viewMode === 'depth-difference' || transform.zoom >= 3) {
       ctx.imageSmoothingEnabled = false;
     } else {
       ctx.imageSmoothingEnabled = true;

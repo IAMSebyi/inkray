@@ -1,8 +1,19 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef, type ReactNode } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import { fetchAppearanceForImage } from '../api/appearanceClient';
+import { getModelAvailability, type ModelAvailability } from '../api/backend';
 import { fetchGeometryForImage, selectSurfaceForGeometry } from '../api/geometryClient';
+import { createDepthDifferenceCanvas } from '../editor/geometryVisualizations';
 import { ImageLoadError, loadImageFromFile } from '../editor/imageLoader';
 import type { AutoAnchorMode } from '../geometry/autoSurfaceAnchor';
+import { compareDepth } from '../geometry/depthComparison';
 import { ArtworkModel } from '../painting/artwork';
 import {
   type ArtworkPlacement,
@@ -16,8 +27,11 @@ import { PaintDocument, type BrushUiConfig } from '../painting/paintDocument';
 import type { PlanarDecalSurface } from '../painting/planarDecal';
 import type { PlanarPaintRenderer } from '../painting/planarPaintRenderer';
 import type {
+  AppearanceModel,
   EditorTool,
+  GeometryModel,
   LoadedImage,
+  NormalModel,
   PaintMode,
   Point2D,
   Size2D,
@@ -175,6 +189,60 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     [cursorStore, cancelActiveStrokes],
   );
 
+  const [geometryChoice, setGeometryModel] = useState<GeometryModel>();
+  const [refineGeometryNormals, setRefineGeometryNormals] = useState(false);
+  const [normalChoice, setNormalModel] = useState<NormalModel>();
+  const [smoothGeometry, setSmoothGeometry] = useState(false);
+  const [smoothingPasses, setSmoothingPasses] = useState(3);
+  const [appearanceModel, setAppearanceModel] = useState<AppearanceModel>('marigold-iid');
+  const [modelAvailability, setModelAvailability] = useState<ModelAvailability | null>(null);
+  useEffect(() => {
+    const controller = new AbortController();
+    void getModelAvailability(controller.signal)
+      .then((models) => {
+        if (!controller.signal.aborted) setModelAvailability(models);
+      })
+      .catch(() => {});
+    return () => controller.abort();
+  }, []);
+  const requestedGeometry =
+    geometryChoice && !modelAvailability?.unavailable[geometryChoice]
+      ? geometryChoice
+      : modelAvailability?.default_geometry;
+  const geometryModel = requestedGeometry ?? 'moge-3';
+  const defaultNormal = modelAvailability?.default_normal ?? 'marigold-normals';
+  const normalModel =
+    normalChoice && !modelAvailability?.unavailable[normalChoice] ? normalChoice : defaultNormal;
+  const activeGeometry = state.geometry.data;
+  const comparedGeometry = state.geometryResults.find(
+    (result) => result.metadata.id === state.comparisonGeometryId,
+  );
+  const geometryComparison = useMemo(() => {
+    if (!activeGeometry || !comparedGeometry) return null;
+    const comparison = compareDepth(activeGeometry, comparedGeometry);
+    return comparison && { ...comparison, preview: createDepthDifferenceCanvas(comparison) };
+  }, [activeGeometry, comparedGeometry]);
+
+  useEffect(() => {
+    if (state.viewMode === 'depth-difference' && !geometryComparison) {
+      dispatch({ type: 'SET_VIEW_MODE', mode: 'rgb' });
+    }
+  }, [state.viewMode, geometryComparison]);
+
+  const setGeometryComparison = useCallback((id: string) => {
+    dispatch({ type: 'SET_GEOMETRY_COMPARISON', id });
+  }, []);
+
+  const activateGeometry = useCallback(
+    (id: string) => {
+      surfaceSelectAbortRef.current?.abort();
+      surfaceSelectAbortRef.current = null;
+      cancelActiveStrokes();
+      dispatch({ type: 'ACTIVATE_GEOMETRY', id });
+    },
+    [cancelActiveStrokes],
+  );
+
   const generateGeometry = useCallback(async () => {
     const targetImage = activeImageRef.current;
     if (!targetImage || geometryInFlightRef.current) {
@@ -190,13 +258,21 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     dispatch({ type: 'GEOMETRY_START' });
 
     try {
-      const data = await fetchGeometryForImage(targetImage, abortController.signal);
+      const data = await fetchGeometryForImage(
+        targetImage,
+        requestedGeometry,
+        abortController.signal,
+        {
+          normalModel: refineGeometryNormals ? normalModel : undefined,
+          smoothIterations: smoothGeometry ? smoothingPasses : 0,
+        },
+      );
       if (abortController.signal.aborted || activeImageRef.current?.id !== targetImage.id) {
         return;
       }
       dispatch({ type: 'GEOMETRY_SUCCESS', data });
     } catch (error) {
-      if (error instanceof DOMException && error.name === 'AbortError') {
+      if (abortController.signal.aborted) {
         return;
       }
       if (activeImageRef.current?.id !== targetImage.id) {
@@ -211,7 +287,14 @@ export function EditorProvider({ children }: { children: ReactNode }) {
         geometryInFlightRef.current = false;
       }
     }
-  }, [cancelActiveStrokes]);
+  }, [
+    cancelActiveStrokes,
+    requestedGeometry,
+    refineGeometryNormals,
+    normalModel,
+    smoothGeometry,
+    smoothingPasses,
+  ]);
 
   const cancelGeometry = useCallback(() => {
     geometryAbortRef.current?.abort();
@@ -235,13 +318,17 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     dispatch({ type: 'APPEARANCE_START' });
 
     try {
-      const data = await fetchAppearanceForImage(targetImage, abortController.signal);
+      const data = await fetchAppearanceForImage(
+        targetImage,
+        appearanceModel,
+        abortController.signal,
+      );
       if (abortController.signal.aborted || activeImageRef.current?.id !== targetImage.id) {
         return;
       }
       dispatch({ type: 'APPEARANCE_SUCCESS', data });
     } catch (error) {
-      if (error instanceof DOMException && error.name === 'AbortError') {
+      if (abortController.signal.aborted) {
         return;
       }
       if (activeImageRef.current?.id !== targetImage.id) {
@@ -256,7 +343,7 @@ export function EditorProvider({ children }: { children: ReactNode }) {
         appearanceInFlightRef.current = false;
       }
     }
-  }, []);
+  }, [appearanceModel]);
 
   const cancelAppearance = useCallback(() => {
     appearanceAbortRef.current?.abort();
@@ -769,8 +856,24 @@ export function EditorProvider({ children }: { children: ReactNode }) {
       toggleBrushObjectVisibility,
       removeBrushObject,
       reorderSceneObject,
+      geometryModel,
+      setGeometryModel,
+      modelAvailability,
+      refineGeometryNormals,
+      setRefineGeometryNormals,
+      normalModel,
+      setNormalModel,
+      smoothGeometry,
+      setSmoothGeometry,
+      smoothingPasses,
+      setSmoothingPasses,
+      geometryComparison,
+      setGeometryComparison,
+      activateGeometry,
       generateGeometry,
       cancelGeometry,
+      appearanceModel,
+      setAppearanceModel,
       generateAppearance,
       cancelAppearance,
       selectSurfaceAtImagePoint,
@@ -824,8 +927,18 @@ export function EditorProvider({ children }: { children: ReactNode }) {
       toggleBrushObjectVisibility,
       removeBrushObject,
       reorderSceneObject,
+      geometryModel,
+      modelAvailability,
+      refineGeometryNormals,
+      normalModel,
+      smoothGeometry,
+      smoothingPasses,
+      geometryComparison,
+      setGeometryComparison,
+      activateGeometry,
       generateGeometry,
       cancelGeometry,
+      appearanceModel,
       generateAppearance,
       cancelAppearance,
       selectSurfaceAtImagePoint,

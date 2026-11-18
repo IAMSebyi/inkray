@@ -1,5 +1,7 @@
 import { createContext } from 'react';
+import type { ModelAvailability } from '../api/backend';
 import type { AutoAnchorMode } from '../geometry/autoSurfaceAnchor';
+import type { DepthComparison } from '../geometry/depthComparison';
 import type { ArtworkPlacement } from '../painting/artworkPlacement';
 import type { BrushEngine, BrushStroke } from '../painting/brushEngine';
 import type { ImageSpaceBrushEngine, ImageSpaceStroke } from '../painting/imageSpacePaint';
@@ -7,7 +9,10 @@ import type { BrushUiConfig } from '../painting/paintDocument';
 import type { PlanarDecalSurface } from '../painting/planarDecal';
 import type { PlanarPaintRenderer } from '../painting/planarPaintRenderer';
 import type {
+  AppearanceModel,
   EditorTool,
+  GeometryModel,
+  NormalModel,
   PaintMode,
   Point2D,
   Size2D,
@@ -58,8 +63,24 @@ export interface EditorContextValue {
   toggleBrushObjectVisibility: (brushObjectId: string) => void;
   removeBrushObject: (brushObjectId: string) => void;
   reorderSceneObject: (fromIndex: number, toIndex: number) => void;
+  geometryModel: GeometryModel;
+  setGeometryModel: (model: GeometryModel) => void;
+  modelAvailability: ModelAvailability | null;
+  refineGeometryNormals: boolean;
+  setRefineGeometryNormals: (enabled: boolean) => void;
+  normalModel: NormalModel;
+  setNormalModel: (model: NormalModel) => void;
+  smoothGeometry: boolean;
+  setSmoothGeometry: (enabled: boolean) => void;
+  smoothingPasses: number;
+  setSmoothingPasses: (passes: number) => void;
+  geometryComparison: (DepthComparison & { preview: HTMLCanvasElement }) | null;
+  setGeometryComparison: (id: string) => void;
+  activateGeometry: (id: string) => void;
   generateGeometry: () => Promise<void>;
   cancelGeometry: () => void;
+  appearanceModel: AppearanceModel;
+  setAppearanceModel: (model: AppearanceModel) => void;
   generateAppearance: () => Promise<void>;
   cancelAppearance: () => void;
   selectSurfaceAtImagePoint: (imagePoint: Point2D) => Promise<void>;

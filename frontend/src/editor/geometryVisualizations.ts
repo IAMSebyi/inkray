@@ -1,3 +1,4 @@
+import type { DepthComparison } from '../geometry/depthComparison';
 import type { GeometryData, Point2D, Size2D } from '../types/editor';
 
 const TURBO_STOPS: readonly [number, number, number][] = [
@@ -90,6 +91,21 @@ function createCanvasFromRgba(
   const imageData = new ImageData(new Uint8ClampedArray(rgba), width, height);
   ctx.putImageData(imageData, 0, 0);
   return canvas;
+}
+
+export function createDepthDifferenceCanvas(comparison: DepthComparison): HTMLCanvasElement {
+  const rgba = new Uint8ClampedArray(comparison.logDifference.length * 4);
+  for (const [i, value] of comparison.logDifference.entries()) {
+    if (!Number.isFinite(value)) continue;
+    const intensity = clamp01(Math.abs(value) / Math.log(2));
+    const color = value < 0 ? ([70, 138, 235] as const) : ([255, 148, 77] as const);
+    const offset = i * 4;
+    rgba[offset] = 31 + (color[0] - 31) * intensity;
+    rgba[offset + 1] = 35 + (color[1] - 35) * intensity;
+    rgba[offset + 2] = 44 + (color[2] - 44) * intensity;
+    rgba[offset + 3] = 255;
+  }
+  return createCanvasFromRgba(rgba, comparison.width, comparison.height);
 }
 
 export function createDepthPreviewCanvas(

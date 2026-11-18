@@ -11,11 +11,8 @@ import type {
   Size2D,
   ViewportTransform,
 } from '../types/editor';
-import {
-  DEFAULT_MAX_CALIBRATED_SHADING,
-  type ShadingCalibrationResult,
-  calibrateShadingScale,
-} from './colorSpace';
+import { DEFAULT_MAX_CALIBRATED_SHADING, type ShadingCalibrationResult } from './colorSpace';
+import { getAppearanceShadingCalibration } from './intrinsicLighting';
 import { type Artwork, rasterizeArtworkRgba, toPremultipliedRgba } from './artwork';
 import type { ArtworkPlacement } from './artworkPlacement';
 import {
@@ -31,6 +28,8 @@ import {
   type ImageSpaceStroke,
   compositeImageStrokeOverRgba,
   computeImagePaintSpec,
+  getDirtyBoundsSinceRevision,
+  mergeDirtyBounds,
   rebuildImageLayerRgba,
 } from './imageSpacePaint';
 import type { PaintDocumentState } from './paintDocument';
@@ -129,7 +128,58 @@ void main() {
 }
 `;
 
+const SAMPLE_BILINEAR_FLOAT3_GLSL = `
+vec3 sampleBilinearFloat3(sampler2D tex, vec2 uvImg, vec2 texSize) {
+  vec2 clampedUv = clamp(uvImg, vec2(0.0), vec2(1.0));
+  vec2 pos = clampedUv * texSize - vec2(0.5);
+  vec2 baseIdx = floor(pos);
+  vec2 f = clamp(pos - baseIdx, vec2(0.0), vec2(1.0));
+  vec2 maxIdx = max(texSize - vec2(1.0), vec2(0.0));
+  vec2 idx0 = clamp(baseIdx, vec2(0.0), maxIdx);
+  vec2 idx1 = clamp(baseIdx + vec2(1.0), vec2(0.0), maxIdx);
+  vec2 invSize = 1.0 / max(texSize, vec2(1.0));
+
+  vec3 c00 = texture2D(tex, (vec2(idx0.x, idx0.y) + 0.5) * invSize).rgb;
+  vec3 c10 = texture2D(tex, (vec2(idx1.x, idx0.y) + 0.5) * invSize).rgb;
+  vec3 c01 = texture2D(tex, (vec2(idx0.x, idx1.y) + 0.5) * invSize).rgb;
+  vec3 c11 = texture2D(tex, (vec2(idx1.x, idx1.y) + 0.5) * invSize).rgb;
+  return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
+}
+`;
+
+const ALBEDO_DETAIL_FRAGMENT_SHADER = `${SAMPLE_BILINEAR_FLOAT3_GLSL}
+uniform sampler2D uAlbedoTex;
+uniform vec2 uAppearanceSize;
+varying vec2 vUv;
+
+vec3 sampleAlbedoSmooth5x5(sampler2D tex, vec2 uvImg, vec2 texSize, vec3 centerAlb) {
+  float stepPx = max(1.0, floor(min(texSize.x, texSize.y) / 40.0));
+  vec2 invSize = stepPx / max(texSize, vec2(1.0));
+  vec3 sumAlb = vec3(0.0);
+  float sumW = 0.0;
+  for (int dy = -2; dy <= 2; dy++) {
+    for (int dx = -2; dx <= 2; dx++) {
+      vec2 offUv = clamp(uvImg + vec2(float(dx), float(dy)) * invSize, vec2(0.0), vec2(1.0));
+      vec3 nbr = clamp(sampleBilinearFloat3(tex, offUv, texSize), 0.0, 1.0);
+      vec3 d = nbr - centerAlb;
+      float w = exp(-dot(d, d) / 0.25);
+      sumAlb += nbr * w;
+      sumW += w;
+    }
+  }
+  return sumAlb / max(sumW, 1e-4);
+}
+
+void main() {
+  vec3 alb = clamp(sampleBilinearFloat3(uAlbedoTex, vUv, uAppearanceSize), 0.0, 1.0);
+  vec3 albSmooth = sampleAlbedoSmooth5x5(uAlbedoTex, vUv, uAppearanceSize, alb);
+  vec3 detail = clamp(alb / max(albSmooth, vec3(0.05)), 0.5, 1.5);
+  gl_FragColor = vec4(detail, 1.0);
+}
+`;
+
 const SHARED_PAINT_FRAGMENT_PREFIX = `${COLOR_FUNCTIONS}
+${SAMPLE_BILINEAR_FLOAT3_GLSL}
 uniform sampler2D uRgbTex;
 uniform sampler2D uDepthTex;
 uniform sampler2D uMaskTex;
@@ -137,6 +187,7 @@ uniform sampler2D uNormalsTex;
 uniform sampler2D uOwnerTex;
 uniform sampler2D uDecalTex;
 uniform sampler2D uAlbedoTex;
+uniform sampler2D uAlbedoDetailTex;
 uniform sampler2D uShadingTex;
 uniform vec2 uAppearanceSize;
 uniform int uEffectivePaintMode;
@@ -175,41 +226,6 @@ float computeScaleAwareTol(float zPlane) {
   return clamp(baseTol, 0.015 * zPlane, 0.14 * zPlane);
 }
 
-vec3 sampleBilinearFloat3(sampler2D tex, vec2 uvImg, vec2 texSize) {
-  vec2 clampedUv = clamp(uvImg, vec2(0.0), vec2(1.0));
-  vec2 pos = clampedUv * texSize - vec2(0.5);
-  vec2 baseIdx = floor(pos);
-  vec2 f = clamp(pos - baseIdx, vec2(0.0), vec2(1.0));
-  vec2 maxIdx = max(texSize - vec2(1.0), vec2(0.0));
-  vec2 idx0 = clamp(baseIdx, vec2(0.0), maxIdx);
-  vec2 idx1 = clamp(baseIdx + vec2(1.0), vec2(0.0), maxIdx);
-  vec2 invSize = 1.0 / max(texSize, vec2(1.0));
-
-  vec3 c00 = texture2D(tex, (vec2(idx0.x, idx0.y) + 0.5) * invSize).rgb;
-  vec3 c10 = texture2D(tex, (vec2(idx1.x, idx0.y) + 0.5) * invSize).rgb;
-  vec3 c01 = texture2D(tex, (vec2(idx0.x, idx1.y) + 0.5) * invSize).rgb;
-  vec3 c11 = texture2D(tex, (vec2(idx1.x, idx1.y) + 0.5) * invSize).rgb;
-  return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
-}
-
-vec3 sampleAlbedoSmooth5x5(sampler2D tex, vec2 uvImg, vec2 texSize, vec3 centerAlb) {
-  float stepPx = max(1.0, floor(min(texSize.x, texSize.y) / 40.0));
-  vec2 invSize = stepPx / max(texSize, vec2(1.0));
-  vec3 sumAlb = vec3(0.0);
-  float sumW = 0.0;
-  for (int dy = -2; dy <= 2; dy++) {
-    for (int dx = -2; dx <= 2; dx++) {
-      vec2 offUv = clamp(uvImg + vec2(float(dx), float(dy)) * invSize, vec2(0.0), vec2(1.0));
-      vec3 nbr = clamp(sampleBilinearFloat3(tex, offUv, texSize), 0.0, 1.0);
-      vec3 d = nbr - centerAlb;
-      float w = exp(-dot(d, d) / 0.25);
-      sumAlb += nbr * w;
-      sumW += w;
-    }
-  }
-  return sumAlb / max(sumW, 1e-4);
-}
-
 vec3 computeLitTargetRgb(vec2 uvImg, vec3 paintRgb) {
   if (uEffectivePaintMode == 0) {
     return srgbToLinearVec3(paintRgb);
@@ -225,8 +241,7 @@ vec3 computeLitTargetRgb(vec2 uvImg, vec3 paintRgb) {
   vec3 sCal = min(shdRaw * uShadingScale, vec3(uMaxCalibratedShading));
   vec3 targetAlb = paintLin;
   if (uEffectivePaintMode == 2 && uTexturePreservation > 0.001) {
-    vec3 albSmooth = sampleAlbedoSmooth5x5(uAlbedoTex, uvImg, uAppearanceSize, alb);
-    vec3 detail = clamp(alb / max(albSmooth, vec3(0.05)), 0.5, 1.5);
+    vec3 detail = clamp(sampleBilinearFloat3(uAlbedoDetailTex, uvImg, uAppearanceSize), 0.5, 1.5);
     targetAlb = clamp(paintLin * mix(vec3(1.0), detail, clamp(uTexturePreservation, 0.0, 1.0)), 0.0, 1.0);
   }
   return origLin + sCal * (targetAlb - alb);
@@ -500,6 +515,7 @@ interface ImageLayerGpuCacheEntry {
   texture: THREE.DataTexture;
   activePreviewId: string | null;
   activePreviewRevision: number;
+  activePreviewBounds: DirtyTexelBounds | null;
 }
 
 interface ArtworkGpuCacheEntry {
@@ -596,8 +612,17 @@ export class PlanarPaintRenderer {
   private readonly uCopyChecker = new THREE.Uniform(0);
   private readonly uCopyPixelRatio = new THREE.Uniform(1);
   private readonly uCopyImageTransform = new THREE.Uniform(new THREE.Vector4(1, 1, 0, 0));
+  private readonly detailMaterial: THREE.ShaderMaterial;
+  private readonly detailScene = new THREE.Scene();
+  private readonly uDetailAlbedoTex = new THREE.Uniform<THREE.Texture>(this.fallbackTex);
+  private readonly uDetailAppearanceSize = new THREE.Uniform(new THREE.Vector2(1, 1));
+  private albedoDetailTarget: THREE.WebGLRenderTarget | null = null;
+  private albedoDetailAppearanceId: string | null = null;
   private sceneTarget: THREE.WebGLRenderTarget | null = null;
   private brushTarget: THREE.WebGLRenderTarget | null = null;
+  private lastViewportWidth = 0;
+  private lastViewportHeight = 0;
+  private lastViewportDpr = 0;
   private readonly usedDecalEntries = new Set<string>();
   private readonly usedImageEntries = new Set<string>();
 
@@ -614,6 +639,7 @@ export class PlanarPaintRenderer {
   private readonly uDecalOwnerTex = new THREE.Uniform<THREE.Texture>(this.fallbackTex);
   private readonly uDecalPaintTex = new THREE.Uniform<THREE.Texture>(this.fallbackTex);
   private readonly uDecalAlbedoTex = new THREE.Uniform<THREE.Texture>(this.fallbackTex);
+  private readonly uDecalAlbedoDetailTex = new THREE.Uniform<THREE.Texture>(this.fallbackTex);
   private readonly uDecalShadingTex = new THREE.Uniform<THREE.Texture>(this.fallbackTex);
   private readonly uDecalAppearanceSize = new THREE.Uniform(new THREE.Vector2(1, 1));
   private readonly uDecalEffectivePaintMode = new THREE.Uniform(0);
@@ -724,6 +750,7 @@ export class PlanarPaintRenderer {
       uOwnerTex: this.uDecalOwnerTex,
       uDecalTex: this.uDecalPaintTex,
       uAlbedoTex: this.uDecalAlbedoTex,
+      uAlbedoDetailTex: this.uDecalAlbedoDetailTex,
       uShadingTex: this.uDecalShadingTex,
       uAppearanceSize: this.uDecalAppearanceSize,
       uEffectivePaintMode: this.uDecalEffectivePaintMode,
@@ -813,6 +840,23 @@ export class PlanarPaintRenderer {
     const copyMesh = new THREE.Mesh(this.quadGeometry, this.copyMaterial);
     copyMesh.frustumCulled = false;
     this.copyScene.add(copyMesh);
+
+    this.detailMaterial = new THREE.ShaderMaterial({
+      vertexShader: QUAD_VERTEX_SHADER,
+      fragmentShader: ALBEDO_DETAIL_FRAGMENT_SHADER,
+      depthTest: false,
+      depthWrite: false,
+      transparent: false,
+      blending: THREE.NoBlending,
+      uniforms: {
+        uQuadTransform: new THREE.Uniform(new THREE.Vector4(1, 1, 0, 0)),
+        uAlbedoTex: this.uDetailAlbedoTex,
+        uAppearanceSize: this.uDetailAppearanceSize,
+      },
+    });
+    const detailMesh = new THREE.Mesh(this.quadGeometry, this.detailMaterial);
+    detailMesh.frustumCulled = false;
+    this.detailScene.add(detailMesh);
 
     this.mesh = new THREE.Mesh(this.quadGeometry, this.baseMaterial);
     this.mesh.frustumCulled = false;
@@ -968,12 +1012,14 @@ export class PlanarPaintRenderer {
     this.shadingTex?.dispose();
     this.albedoTex = null;
     this.shadingTex = null;
+    this.albedoDetailAppearanceId = null;
     this.appearanceWidth = 0;
     this.appearanceHeight = 0;
     this.surfaceCalibrations.clear();
+    this.sceneCalibrations.clear();
     this.uploadedAppearanceId = nextId;
 
-    if (!appearance) {
+    if (!appearance?.shading) {
       return;
     }
 
@@ -985,54 +1031,95 @@ export class PlanarPaintRenderer {
     this.appearanceHeight = h;
   }
 
+  private ensureAlbedoDetailTexture(): void {
+    if (
+      !this.albedoTex ||
+      this.appearanceWidth <= 0 ||
+      this.appearanceHeight <= 0 ||
+      this.albedoDetailAppearanceId === this.uploadedAppearanceId
+    ) {
+      return;
+    }
+
+    if (
+      !this.albedoDetailTarget ||
+      this.albedoDetailTarget.width !== this.appearanceWidth ||
+      this.albedoDetailTarget.height !== this.appearanceHeight
+    ) {
+      this.albedoDetailTarget?.dispose();
+      this.albedoDetailTarget = new THREE.WebGLRenderTarget(
+        this.appearanceWidth,
+        this.appearanceHeight,
+        {
+          type: THREE.HalfFloatType,
+          depthBuffer: false,
+          stencilBuffer: false,
+          minFilter: THREE.NearestFilter,
+          magFilter: THREE.NearestFilter,
+          wrapS: THREE.ClampToEdgeWrapping,
+          wrapT: THREE.ClampToEdgeWrapping,
+        },
+      );
+    }
+
+    const prevTarget = this.renderer.getRenderTarget();
+    this.uDetailAlbedoTex.value = this.albedoTex;
+    this.uDetailAppearanceSize.value.set(this.appearanceWidth, this.appearanceHeight);
+    this.renderer.setRenderTarget(this.albedoDetailTarget);
+    this.renderer.render(this.detailScene, this.camera);
+    this.renderer.setRenderTarget(prevTarget);
+    this.albedoDetailAppearanceId = this.uploadedAppearanceId;
+  }
+
   private getSurfaceCalibration(
     surface: PlanarDecalSurface,
     geometry: GeometryData,
     appearance: AppearanceData,
-  ): ShadingCalibrationResult {
+  ): ShadingCalibrationResult | null {
+    if (!appearance.shading) {
+      return null;
+    }
     const key = `${appearance.metadata.id}|${surface.id}`;
     const cached = this.surfaceCalibrations.get(key);
     if (cached) {
       return cached;
     }
 
-    const calibration = calibrateShadingScale({
-      linearReference: appearance.linearReference,
-      albedo: appearance.albedo,
-      shading: appearance.shading,
-      residual: appearance.residual,
-      appearanceWidth: appearance.metadata.appearance_width,
-      appearanceHeight: appearance.metadata.appearance_height,
-      supportMask: surface.supportMask,
-      supportWidth: geometry.metadata.inference_width,
-      supportHeight: geometry.metadata.inference_height,
+    const calibration = getAppearanceShadingCalibration(appearance, {
+      mask: surface.supportMask,
+      size: {
+        width: geometry.metadata.inference_width,
+        height: geometry.metadata.inference_height,
+      },
     });
-    this.surfaceCalibrations.set(key, calibration);
+    if (calibration) this.surfaceCalibrations.set(key, calibration);
     return calibration;
   }
 
   private getSceneCalibration(
     geometry: GeometryData | null,
     appearance: AppearanceData,
-  ): ShadingCalibrationResult {
+  ): ShadingCalibrationResult | null {
+    if (!appearance.shading) {
+      return null;
+    }
     const key = `${appearance.metadata.id}|${geometry?.metadata.id ?? 'none'}`;
     const cached = this.sceneCalibrations.get(key);
     if (cached) {
       return cached;
     }
 
-    const calibration = calibrateShadingScale({
-      linearReference: appearance.linearReference,
-      albedo: appearance.albedo,
-      shading: appearance.shading,
-      residual: appearance.residual,
-      appearanceWidth: appearance.metadata.appearance_width,
-      appearanceHeight: appearance.metadata.appearance_height,
-      supportMask: geometry?.mask ?? null,
-      supportWidth: geometry?.metadata.inference_width,
-      supportHeight: geometry?.metadata.inference_height,
-    });
-    this.sceneCalibrations.set(key, calibration);
+    const support = geometry
+      ? {
+          mask: geometry.mask,
+          size: {
+            width: geometry.metadata.inference_width,
+            height: geometry.metadata.inference_height,
+          },
+        }
+      : undefined;
+    const calibration = getAppearanceShadingCalibration(appearance, support);
+    if (calibration) this.sceneCalibrations.set(key, calibration);
     return calibration;
   }
 
@@ -1123,6 +1210,7 @@ export class PlanarPaintRenderer {
         texture,
         activePreviewId: null,
         activePreviewRevision: 0,
+        activePreviewBounds: null,
       };
       this.imageLayerEntries.set(cacheKey, entry);
     }
@@ -1134,6 +1222,7 @@ export class PlanarPaintRenderer {
       entry.displayRgba.set(entry.committedRgba);
       entry.activePreviewId = null;
       entry.activePreviewRevision = 0;
+      entry.activePreviewBounds = null;
       needsUpload = true;
     }
 
@@ -1142,17 +1231,29 @@ export class PlanarPaintRenderer {
         entry.activePreviewId !== livePreview.id ||
         entry.activePreviewRevision !== livePreview.revision
       ) {
-        entry.displayRgba.set(entry.committedRgba);
+        const sameStroke =
+          entry.activePreviewId === livePreview.id &&
+          entry.activePreviewRevision <= livePreview.revision;
+        const dirtyBounds = sameStroke
+          ? getDirtyBoundsSinceRevision(livePreview, entry.activePreviewRevision)
+          : (mergeDirtyBounds(entry.activePreviewBounds, livePreview.bounds) ?? livePreview.bounds);
+
         if (livePreview.layerWidth === spec.width && livePreview.layerHeight === spec.height) {
+          for (let py = dirtyBounds.minY; py <= dirtyBounds.maxY; py++) {
+            const rowStart = (py * spec.width + dirtyBounds.minX) * 4;
+            const rowEnd = (py * spec.width + dirtyBounds.maxX + 1) * 4;
+            entry.displayRgba.set(entry.committedRgba.subarray(rowStart, rowEnd), rowStart);
+          }
           compositeStrokeMaskOverRgba(
             entry.displayRgba,
             livePreview.alphaMask,
             livePreview.brush,
             spec.width,
-            undefined,
+            dirtyBounds,
             livePreview.mode,
           );
         } else {
+          entry.displayRgba.set(entry.committedRgba);
           compositeImageStrokeOverRgba(entry.displayRgba, spec.width, spec.height, {
             id: livePreview.id,
             layer: livePreview.layer,
@@ -1171,12 +1272,23 @@ export class PlanarPaintRenderer {
         }
         entry.activePreviewId = livePreview.id;
         entry.activePreviewRevision = livePreview.revision;
+        entry.activePreviewBounds = { ...livePreview.bounds };
         needsUpload = true;
       }
     } else if (entry.activePreviewId !== null) {
+      if (entry.activePreviewBounds) {
+        const b = entry.activePreviewBounds;
+        for (let py = b.minY; py <= b.maxY; py++) {
+          const rowStart = (py * spec.width + b.minX) * 4;
+          const rowEnd = (py * spec.width + b.maxX + 1) * 4;
+          entry.displayRgba.set(entry.committedRgba.subarray(rowStart, rowEnd), rowStart);
+        }
+      } else {
+        entry.displayRgba.set(entry.committedRgba);
+      }
       entry.activePreviewId = null;
       entry.activePreviewRevision = 0;
-      entry.displayRgba.set(entry.committedRgba);
+      entry.activePreviewBounds = null;
       needsUpload = true;
     }
 
@@ -1577,7 +1689,7 @@ export class PlanarPaintRenderer {
             appearance,
             surfaceCalibration,
           );
-          this.uDecalShadingScale.value = surfaceCalibration.scale;
+          this.uDecalShadingScale.value = surfaceCalibration?.scale ?? 1.0;
         }
         const committed = layer.strokes.filter((stroke) => stroke.id !== activeStroke?.id);
         const paintStrokes = layer.erase
@@ -1756,9 +1868,17 @@ export class PlanarPaintRenderer {
     this.renderer.clear(true, false, false);
     this.renderer.render(this.scene, this.camera);
 
+    if (doc.paintMode === 'texture' && this.albedoTex) {
+      this.ensureAlbedoDetailTexture();
+    }
+
     this.uDecalQuadTransform.value.set(...quadTransform);
     this.uDecalRgbTex.value = this.rgbTex ?? this.fallbackTex;
     this.uDecalAlbedoTex.value = this.albedoTex ?? this.fallbackTex;
+    this.uDecalAlbedoDetailTex.value =
+      doc.paintMode === 'texture' && this.albedoDetailTarget
+        ? this.albedoDetailTarget.texture
+        : this.fallbackTex;
     this.uDecalShadingTex.value = this.shadingTex ?? this.fallbackTex;
     this.uDecalAppearanceSize.value.set(
       Math.max(1, this.appearanceWidth),
@@ -2068,9 +2188,18 @@ export class PlanarPaintRenderer {
 
     const safeDpr = Number.isFinite(dpr) && dpr > 0 ? dpr : 1;
     this.renderer.setRenderTarget(null);
-    this.renderer.setPixelRatio(safeDpr);
-    this.renderer.setSize(viewportSize.width, viewportSize.height, false);
-    this.renderer.setViewport(0, 0, viewportSize.width, viewportSize.height);
+    if (
+      viewportSize.width !== this.lastViewportWidth ||
+      viewportSize.height !== this.lastViewportHeight ||
+      safeDpr !== this.lastViewportDpr
+    ) {
+      this.renderer.setPixelRatio(safeDpr);
+      this.renderer.setSize(viewportSize.width, viewportSize.height, false);
+      this.renderer.setViewport(0, 0, viewportSize.width, viewportSize.height);
+      this.lastViewportWidth = viewportSize.width;
+      this.lastViewportHeight = viewportSize.height;
+      this.lastViewportDpr = safeDpr;
+    }
     this.renderer.setClearColor(0x000000, 0);
 
     this.ensureImageUploaded(image);
@@ -2202,6 +2331,7 @@ export class PlanarPaintRenderer {
         }, 'image/png');
       });
     } finally {
+      this.lastViewportDpr = 0;
       this.renderer.setRenderTarget(null);
       this.renderer.setPixelRatio(prevPixelRatio);
       renderTarget.dispose();
@@ -2255,6 +2385,8 @@ export class PlanarPaintRenderer {
     this.baseMaterial.dispose();
     this.overlayMaterial.dispose();
     this.curvedArtworkMaterial.dispose();
+    this.detailMaterial.dispose();
+    this.albedoDetailTarget?.dispose();
     this.sceneTarget?.dispose();
     this.brushTarget?.dispose();
     this.copyMaterial.dispose();
