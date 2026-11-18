@@ -1,0 +1,27 @@
+frontend/e2e/inference.spec.ts
+  h_af746f1f05a814 1-60,64-132,134-149,151-201
+  h_af746f1f05a814 61-63,133,150
+.github/workflows/ci.yml
+  h_af746f1f05a814 57-64,93,97,100
+.gitignore
+  h_af746f1f05a814 83-84
+frontend/package-lock.json
+  h_af746f1f05a814 20-21,1039-1054,1509-1518,3153-3181,3581-3587
+frontend/package.json
+  h_af746f1f05a814 16-17,28-29
+frontend/playwright.config.ts
+  h_af746f1f05a814 1-14
+frontend/tsconfig.node.json
+  h_af746f1f05a814 5,22
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e018929ceaf580a64d5dd082e03db5d4b79485a1",
+  "prompts": {},
+  "humans": {
+    "h_af746f1f05a814": {
+      "author": "Iorga Sebastian George <sebyiorga95@yahoo.com>"
+    }
+  }
+}
