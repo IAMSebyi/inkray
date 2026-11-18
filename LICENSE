@@ -28,5 +28,16 @@ not part of this source distribution and remain governed by their respective
 upstream licenses:
 - MoGe-3 (Ruicheng/moge-3-vitl): MIT License (with third-party backbone
   components under Apache License 2.0).
-- Marigold IID Lighting v1.1 (prs-eth/marigold-iid-lighting-v1-1):
-  CreativeML OpenRAIL++-M.
+- Apple Depth Pro (apple/DepthPro-hf): the checkpoint is released under
+  Apple's AMLR terms.
+- Marigold IID Lighting v1.1 and Normals v1.1 (prs-eth/marigold-iid-lighting-v1-1,
+  prs-eth/marigold-normals-v1-1): CreativeML OpenRAIL++-M.
+- Marigold V2 Albedo and Normals (huawei-bayerlab/marigold-v2-0):
+  Apache License 2.0 for the adapters and the Qwen-Image-Edit-2509 backbone.
+- Latent Intrinsics (xyxingx/ALI_RADIO2.5h): the checkpoint mirror lists its
+  license as "other". The external unets.py used by the adapter carries a
+  CC BY-NC-SA 4.0 notice.
+- IID-in-the-Wild (compphoto/Intrinsic): provided for academic / non-commercial
+  use only; methodology is patent pending.
+
+See the README for links to the upstream terms.
