@@ -1,4 +1,6 @@
-from moge.model.v3 import MoGeModel
+from importlib.util import find_spec
+import sys
+
 import numpy as np
 import torch
 
@@ -8,13 +10,9 @@ from ..geometry.mask import ValidMask
 from ..geometry.normals import NormalMap
 from ..geometry.points import Points3D
 from ..geometry.result import GeometryResult
-from .base import InferenceModel
-
-
-def resolve_device(device: str) -> torch.device:
-    if device == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    return torch.device(device)
+from ..utils.image import as_rgb_float01
+from .base import InferenceModel, ModelUnavailableError
+from .memory import move_to_device, offload_to_cpu, resolve_device
 
 
 class MoGeInference(InferenceModel[np.ndarray, GeometryResult]):
@@ -25,38 +23,49 @@ class MoGeInference(InferenceModel[np.ndarray, GeometryResult]):
         resolution_level: int = 9,
         refine_steps: int = 3,
         use_fp16: bool = True,
+        lazy_load: bool = False,
     ) -> None:
         self.model_id = model_id
         self.device = resolve_device(device)
         self.resolution_level = resolution_level
         self.refine_steps = refine_steps
         self.use_fp16 = use_fp16 and self.device.type == "cuda"
-        self.model = MoGeModel.from_pretrained(model_id).to(self.device).eval()
-        self._active_device = self.device
+        self.model = None
+        self._active_device = torch.device("cpu")
+
+        if not lazy_load:
+            self.activate_device()
+
+    def unavailable_reason(self) -> str | None:
+        if sys.platform not in ("linux", "win32"):
+            return "MoGe-3 requires Linux or Windows."
+        if self.refine_steps > 0 and (self.device.type != "cuda" or not torch.cuda.is_available()):
+            return "MoGe-3 sparse refinement requires CUDA."
+        if find_spec("moge") is None:
+            return 'Install the MoGe-3 extra with pip install -e ".[moge]".'
+        return None
 
     def activate_device(self) -> None:
-        if self._active_device != self.device:
-            self.model.to(self.device)
-            self._active_device = self.device
+        if self.model is None:
+            if reason := self.unavailable_reason():
+                raise ModelUnavailableError(reason)
+            try:
+                from moge.model.v3 import MoGeModel
+            except ImportError as exc:
+                raise ModelUnavailableError("Check the MoGe-3, FlexGEMM, and Triton installation.") from exc
+
+            self.model = MoGeModel.from_pretrained(self.model_id).eval()
+        self._active_device = move_to_device(self.model, self._active_device, self.device)
 
     def offload_to_cpu(self) -> None:
-        if self.device.type == "cuda" and self._active_device.type == "cuda":
-            self.model.to("cpu")
-            self._active_device = torch.device("cpu")
-            torch.cuda.empty_cache()
+        self._active_device = offload_to_cpu(self.model, self._active_device)
 
     def run(self, input_data: np.ndarray) -> GeometryResult:
-        if input_data.ndim != 3 or input_data.shape[2] != 3:
-            raise ValueError(f"Expected RGB image array (H, W, 3), got {input_data.shape}.")
-
+        rgb = as_rgb_float01(input_data)
         self.activate_device()
+        assert self.model is not None
 
-        if np.issubdtype(input_data.dtype, np.floating):
-            rgb = np.clip(input_data, 0.0, 1.0).astype(np.float32, copy=False)
-        else:
-            rgb = input_data.astype(np.float32) / 255.0
-
-        tensor = torch.from_numpy(np.ascontiguousarray(rgb)).permute(2, 0, 1).to(self.device)
+        tensor = torch.from_numpy(rgb).permute(2, 0, 1).to(self.device)
 
         with torch.inference_mode():
             output = self.model.infer(

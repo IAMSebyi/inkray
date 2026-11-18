@@ -25,6 +25,25 @@ class ImageTooLargeError(ValueError):
     pass
 
 
+def as_rgb_image(rgb: np.ndarray) -> Image.Image:
+    if rgb.ndim != 3 or rgb.shape[2] != 3 or not all(rgb.shape[:2]):
+        raise ValueError(f"Expected RGB image array (H, W, 3), got {rgb.shape}.")
+    if np.issubdtype(rgb.dtype, np.floating):
+        rgb = np.rint(np.clip(rgb, 0, 1) * 255)
+    return Image.fromarray(np.clip(rgb, 0, 255).astype(np.uint8, copy=False))
+
+
+def as_rgb_float01(rgb: np.ndarray) -> np.ndarray:
+    """Validate an (H, W, 3) RGB array and return contiguous float32 values in [0, 1]."""
+    if rgb.ndim != 3 or rgb.shape[2] != 3 or not all(rgb.shape[:2]):
+        raise ValueError(f"Expected RGB image array (H, W, 3), got {rgb.shape}.")
+    if np.issubdtype(rgb.dtype, np.floating):
+        normalized = np.clip(rgb, 0.0, 1.0).astype(np.float32, copy=False)
+    else:
+        normalized = (np.asarray(rgb, dtype=np.float32) / 255.0).clip(0.0, 1.0)
+    return np.ascontiguousarray(normalized, dtype=np.float32)
+
+
 def validate_image_pixel_count(width: int, height: int, max_pixels: int) -> None:
     if width * height > max_pixels:
         raise ImageTooLargeError("Uploaded image exceeds the pixel count limit.")

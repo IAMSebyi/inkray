@@ -2,6 +2,7 @@ from dataclasses import replace
 from io import BytesIO
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock
 from fastapi.testclient import TestClient
 import numpy as np
@@ -14,8 +15,13 @@ from app.config import Settings
 from app.geometry.depth import DepthMap
 from app.geometry.intrinsics import CameraIntrinsics
 from app.geometry.mask import ValidMask
+from app.geometry.normals import NormalMap
 from app.geometry.points import Points3D
 from app.geometry.result import GeometryResult
+from app.inference import moge
+from app.inference.depth_pro import DepthProInference
+from app.inference.marigold import MarigoldNormalsInference
+from app.inference.marigold_v2 import MarigoldV2Inference, MarigoldV2NormalsInference, MarigoldV2Runner
 from app.main import create_app
 
 
@@ -23,6 +29,36 @@ def png_bytes() -> bytes:
     output = BytesIO()
     Image.new("RGB", (4, 4), (100, 120, 140)).save(output, format="PNG")
     return output.getvalue()
+
+
+def test_macos_defaults_to_depth_pro_without_importing_moge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, models: tuple[Mock, Mock],
+) -> None:
+    monkeypatch.setattr(moge, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(moge, "find_spec", Mock(side_effect=AssertionError("MoGe discovery on macOS")))
+    monkeypatch.setattr(DepthProInference, "activate_device", lambda self: None)
+    run_depth = models[0].run
+    monkeypatch.setattr(DepthProInference, "run", run_depth)
+
+    settings = Settings(
+        device="cpu", cache_dir=tmp_path / "geometry", appearance_cache_dir=tmp_path / "appearance",
+    )
+    with TestClient(create_app(settings)) as client:
+        capabilities = client.get("/api/models").json()
+        assert capabilities["default_geometry"] == "depth-pro"
+        assert capabilities["default_normal"] == "marigold-normals"
+        assert "Linux or Windows" in capabilities["unavailable"]["moge-3"]
+        assert "marigold-v2" in capabilities["unavailable"]
+        assert "marigold-normals" not in capabilities["unavailable"]
+        assert "marigold-iid" not in capabilities["unavailable"]
+        files = {"file": ("image.png", png_bytes(), "image/png")}
+        response = client.post("/api/geometry/infer", files=files)
+        assert response.status_code == 200
+        assert response.json()["model"] == "depth-pro"
+        response = client.post("/api/geometry/infer?model=moge-3", files=files)
+        assert response.status_code == 503
+        assert "Linux or Windows" in response.json()["detail"]
+    run_depth.assert_called_once()
 
 
 @pytest.fixture
@@ -146,3 +182,136 @@ def test_pixel_limit_applies_to_cached_images(
         response = client.post(f"/api/{kind}/infer", files=files)
     assert response.status_code == 413
     assert models[0 if kind == "geometry" else 1].run.call_count == 1
+
+
+def test_albedo_only_model_has_its_own_cache_entry(
+    tmp_path: Path,
+    models: tuple[Mock, Mock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    infer_albedo = Mock(return_value=AppearanceResult.from_albedo(
+        np.full((4, 4, 3), 0.25, dtype=np.float32), MarigoldV2Inference.model_id, 4,
+    ))
+    monkeypatch.setattr(MarigoldV2Inference, "run", infer_albedo)
+    settings = Settings(cache_dir=tmp_path / "geometry", appearance_cache_dir=tmp_path / "appearance")
+    files = {"file": ("image.png", png_bytes(), "image/png")}
+    with TestClient(create_app(settings, *models)) as client:
+        default = client.post("/api/appearance/infer", files=files).json()
+        url = "/api/appearance/infer?model=marigold-v2"
+        response = client.post(url, files=files)
+        assert response.status_code == 200
+        alternative = response.json()
+        assert alternative["id"] != default["id"]
+        assert alternative["model_id"] == MarigoldV2Inference.model_id
+        assert set(alternative["arrays"]) == {"albedo"}
+        assert client.post(url, files=files).json()["cached"] is True
+        maps = f"/api/appearance/{alternative['id']}/maps"
+        assert client.get(f"{maps}/albedo").status_code == 200
+        assert client.get(f"{maps}/shading").status_code == 404
+        assert client.get(f"{maps}/residual").status_code == 404
+    assert infer_albedo.call_count == 1
+    assert models[1].run.call_count == 1
+
+
+def test_unconfigured_model_returns_actionable_error(
+    tmp_path: Path,
+    models: tuple[Mock, Mock],
+) -> None:
+    settings = Settings(
+        cache_dir=tmp_path / "geometry", appearance_cache_dir=tmp_path / "appearance",
+        latent_intrinsics_repo="",
+    )
+    with TestClient(create_app(settings, *models)) as client:
+        response = client.post(
+            "/api/appearance/infer?model=latent-intrinsics",
+            files={"file": ("image.png", png_bytes(), "image/png")},
+        )
+    assert response.status_code == 503
+    assert "backend/.cache/models/latent-intrinsics" in response.json()["detail"]
+    models[1].run.assert_not_called()
+
+
+def test_normal_refinement_reuses_base_geometry_and_has_its_own_cache_entry(
+    tmp_path: Path,
+    models: tuple[Mock, Mock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guide_normals = NormalMap(
+        np.broadcast_to(np.array([0.0, 0.0, -1.0], dtype=np.float32), (4, 4, 3))
+    )
+    run_v11 = Mock(return_value=guide_normals)
+    monkeypatch.setattr(MarigoldNormalsInference, "run", run_v11)
+    predict_v2 = Mock(return_value=np.broadcast_to(np.array([0.0, 0.0, 1.0], dtype=np.float32), (4, 4, 3)))
+    monkeypatch.setattr(MarigoldV2Runner, "predict", predict_v2)
+
+    settings = Settings(cache_dir=tmp_path / "geometry", appearance_cache_dir=tmp_path / "appearance")
+    files = {"file": ("image.png", png_bytes(), "image/png")}
+    with TestClient(create_app(settings, *models)) as client:
+        base = client.post("/api/geometry/infer", files=files).json()
+
+        url_v11 = "/api/geometry/infer?refine_normals=true"
+        resp_v11 = client.post(url_v11, files=files)
+        assert resp_v11.status_code == 200
+        refined_v11 = resp_v11.json()
+        assert refined_v11["id"] != base["id"]
+        assert refined_v11["normal_model_id"] == MarigoldNormalsInference.model_id
+        assert client.post(url_v11, files=files).json()["cached"] is True
+
+        url_v2 = "/api/geometry/infer?refine_normals=true&normal_model=marigold-v2"
+        resp_v2 = client.post(url_v2, files=files)
+        assert resp_v2.status_code == 200
+        refined_v2 = resp_v2.json()
+        assert refined_v2["id"] not in {base["id"], refined_v11["id"]}
+        assert refined_v2["normal_model_id"] == MarigoldV2NormalsInference.model_id
+        assert client.post(url_v2, files=files).json()["cached"] is True
+
+        bad = client.post("/api/geometry/infer?refine_normals=true&normal_model=unknown", files=files)
+        assert bad.status_code == 400
+
+    assert models[0].run.call_count == 1
+    run_v11.assert_called_once()
+    predict_v2.assert_called_once()
+    assert predict_v2.call_args.args[1] == "normals"
+
+
+def test_geometry_smoothing_reuses_cached_base_and_validates_iterations(
+    tmp_path: Path,
+    models: tuple[Mock, Mock],
+) -> None:
+    settings = Settings(cache_dir=tmp_path / "geometry", appearance_cache_dir=tmp_path / "appearance")
+    files = {"file": ("image.png", png_bytes(), "image/png")}
+    with TestClient(create_app(settings, *models)) as client:
+        base = client.post("/api/geometry/infer", files=files).json()
+        smooth_url = "/api/geometry/infer?smooth_iterations=3"
+        resp = client.post(smooth_url, files=files)
+        assert resp.status_code == 200
+        smoothed = resp.json()
+        assert smoothed["id"] != base["id"]
+        assert smoothed["smooth_iterations"] == 3
+        assert client.post(smooth_url, files=files).json()["cached"] is True
+
+        assert client.post("/api/geometry/infer?smooth_iterations=11", files=files).status_code == 400
+        assert client.post("/api/geometry/infer?smooth_iterations=-1", files=files).status_code == 400
+
+    assert models[0].run.call_count == 1
+
+
+def test_iid_in_the_wild_reports_actionable_setup_when_uninstalled(
+    tmp_path: Path,
+    models: tuple[Mock, Mock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.inference import iid_in_the_wild
+
+    monkeypatch.setattr(iid_in_the_wild, "find_spec", lambda name: None if name == "intrinsic" else object())
+    settings = Settings(cache_dir=tmp_path / "geometry", appearance_cache_dir=tmp_path / "appearance")
+    with TestClient(create_app(settings, *models)) as client:
+        caps = client.get("/api/models").json()
+        assert "iid-in-the-wild" in caps["unavailable"]
+        resp = client.post(
+            "/api/appearance/infer?model=iid-in-the-wild",
+            files={"file": ("image.png", png_bytes(), "image/png")},
+        )
+    assert resp.status_code == 503
+    assert "iid-in-the-wild" in resp.json()["detail"]
+    models[1].run.assert_not_called()

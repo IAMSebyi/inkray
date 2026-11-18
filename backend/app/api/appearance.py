@@ -1,8 +1,10 @@
 from dataclasses import asdict
 import threading
 from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFile
+import numpy as np
 from starlette.concurrency import run_in_threadpool
 
+from ..appearance.result import AppearanceResult
 from ..cache.appearance_cache import (
     AppearanceCache,
     AppearanceInferenceParams,
@@ -12,6 +14,7 @@ from ..cache.appearance_cache import (
     compute_image_sha256,
 )
 from ..config import Settings
+from ..inference.base import InferenceModel, ModelUnavailableError
 from ..inference.memory import is_cuda_oom, prepare_model_for_inference
 from ..utils.image import (
     ImageTooLargeError,
@@ -24,21 +27,9 @@ from .uploads import read_image_upload
 router = APIRouter(prefix="/api/appearance", tags=["appearance"])
 
 
-def _appearance_params(settings: Settings) -> AppearanceInferenceParams:
-    return AppearanceInferenceParams(
-        model_id=settings.appearance_model_id,
-        denoising_steps=settings.appearance_denoising_steps,
-        processing_resolution=settings.appearance_processing_resolution,
-        ensemble_size=settings.appearance_ensemble_size,
-        seed=settings.appearance_seed,
-        use_fp16=settings.appearance_use_fp16,
-        max_image_size=settings.appearance_max_image_size,
-    )
-
-
 def _infer_and_cache(
-    model: object,
-    peer_model: object | None,
+    model: InferenceModel[np.ndarray, AppearanceResult],
+    models: tuple[object, ...],
     offload_inactive: bool,
     cache: AppearanceCache,
     lock: threading.Lock,
@@ -62,10 +53,10 @@ def _infer_and_cache(
 
         prepare_model_for_inference(
             active_model=model,
-            peer_models=(peer_model,),
+            peer_models=models,
             offload_inactive=offload_inactive,
         )
-        result = model.run(decoded.rgb)  # type: ignore[attr-defined]
+        result = model.run(decoded.rgb)
         metadata = build_appearance_metadata(
             cache_id=cache_id,
             image_sha256=image_sha256,
@@ -78,15 +69,18 @@ def _infer_and_cache(
 
 
 @router.post("/infer")
-async def infer_appearance(request: Request, file: UploadFile = File(...)) -> dict[str, object]:
+async def infer_appearance(
+    request: Request, file: UploadFile = File(...), model: str = "marigold-iid",
+) -> dict[str, object]:
     settings: Settings = request.app.state.settings
+    selection = request.app.state.appearance_models.get(model)
+    if selection is None:
+        raise HTTPException(status_code=400, detail=f"Unknown appearance model {model!r}.")
+    inference, params = selection
     raw_bytes = await read_image_upload(file, settings.max_upload_bytes)
     cache: AppearanceCache = request.app.state.appearance_cache
-    model = request.app.state.appearance_model
-    peer_model = getattr(request.app.state, "inference_model", None)
     lock: threading.Lock = request.app.state.inference_lock
 
-    params = _appearance_params(settings)
     image_sha256 = compute_image_sha256(raw_bytes)
     cache_id = build_appearance_cache_key(image_sha256, params)
 
@@ -100,8 +94,8 @@ async def infer_appearance(request: Request, file: UploadFile = File(...)) -> di
 
         metadata_dict, was_cached = await run_in_threadpool(
             _infer_and_cache,
-            model,
-            peer_model,
+            inference,
+            request.app.state.models,
             settings.offload_inactive_models,
             cache,
             lock,
@@ -115,6 +109,8 @@ async def infer_appearance(request: Request, file: UploadFile = File(...)) -> di
         raise HTTPException(status_code=413, detail=str(exc)) from exc
     except InvalidImageError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ModelUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
         if is_cuda_oom(exc):
             raise HTTPException(

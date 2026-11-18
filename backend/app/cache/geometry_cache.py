@@ -21,10 +21,13 @@ VALID_MAP_KINDS = ("depth", "normals", "points", "mask")
 @dataclass(frozen=True)
 class InferenceParams:
     model_id: str
-    resolution_level: int
-    refine_steps: int
-    use_fp16: bool
-    max_image_size: int
+    resolution_level: int = 0
+    refine_steps: int = 0
+    use_fp16: bool = False
+    max_image_size: int = 0
+    cache_variant: str | None = None
+    normal_model_id: str | None = None
+    smooth_iterations: int = 0
 
 
 @dataclass(frozen=True)
@@ -48,6 +51,8 @@ class GeometryRecordMetadata:
     valid_pixel_count: int
     has_normals: bool
     arrays: dict[str, dict[str, object]]
+    normal_model_id: str | None = None
+    smooth_iterations: int = 0
 
 
 def compute_image_sha256(raw_bytes: bytes) -> str:
@@ -55,15 +60,18 @@ def compute_image_sha256(raw_bytes: bytes) -> str:
 
 
 def build_cache_key(image_sha256: str, params: InferenceParams) -> str:
+    options = asdict(params)
+    if params.cache_variant is None:
+        del options["cache_variant"]
+    if params.normal_model_id is None:
+        del options["normal_model_id"]
+    if params.smooth_iterations == 0:
+        del options["smooth_iterations"]
     payload = json.dumps(
         {
             "cache_version": CACHE_FORMAT_VERSION,
             "image_sha256": image_sha256,
-            "model_id": params.model_id,
-            "resolution_level": params.resolution_level,
-            "refine_steps": params.refine_steps,
-            "use_fp16": params.use_fp16,
-            "max_image_size": params.max_image_size,
+            **options,
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -107,6 +115,8 @@ def build_metadata(
         valid_pixel_count=result.mask.valid_count,
         has_normals=result.normals is not None,
         arrays=arrays,
+        normal_model_id=params.normal_model_id,
+        smooth_iterations=params.smooth_iterations,
     )
 
 

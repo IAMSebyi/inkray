@@ -1,5 +1,5 @@
 import base64
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import math
 import threading
 from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFile
@@ -17,8 +17,12 @@ from ..cache.geometry_cache import (
     compute_image_sha256,
 )
 from ..config import Settings
+from ..geometry.normal_refinement import refine_depth_with_normals
+from ..geometry.normals import NormalMap
 from ..geometry.result import GeometryResult
+from ..geometry.smoothing import smooth_geometry
 from ..geometry.surface_selector import SurfaceSelectionOutcome, SurfaceSelector
+from ..inference.base import InferenceModel, ModelUnavailableError
 from ..inference.memory import is_cuda_oom, prepare_model_for_inference
 from ..utils.image import (
     ImageTooLargeError,
@@ -36,19 +40,9 @@ class SelectSurfaceRequest(BaseModel):
     image_y: float
 
 
-def _inference_params(settings: Settings) -> InferenceParams:
-    return InferenceParams(
-        model_id=settings.model_id,
-        resolution_level=settings.resolution_level,
-        refine_steps=settings.refine_steps,
-        use_fp16=settings.use_fp16,
-        max_image_size=settings.max_image_size,
-    )
-
-
 def _infer_and_cache(
-    model: object,
-    peer_model: object | None,
+    model: InferenceModel[np.ndarray, GeometryResult],
+    models: tuple[object, ...],
     offload_inactive: bool,
     cache: GeometryCache,
     lock: threading.Lock,
@@ -57,6 +51,7 @@ def _infer_and_cache(
     params: InferenceParams,
     raw_bytes: bytes,
     max_image_pixels: int,
+    normal_model: InferenceModel[np.ndarray, NormalMap] | None,
 ) -> tuple[dict[str, object], bool]:
     with lock:
         existing = cache.get_metadata(cache_id)
@@ -70,33 +65,88 @@ def _infer_and_cache(
             raw_bytes, max_image_size=params.max_image_size, max_pixels=max_image_pixels,
         )
 
-        prepare_model_for_inference(
-            active_model=model,
-            peer_models=(peer_model,),
-            offload_inactive=offload_inactive,
+        original_size = (decoded.original_width, decoded.original_height)
+        unsmoothed_params = replace(params, smooth_iterations=0)
+        unsmoothed_id = (
+            build_cache_key(image_sha256, unsmoothed_params)
+            if params.smooth_iterations > 0
+            else cache_id
         )
-        result = model.run(decoded.rgb)  # type: ignore[attr-defined]
-        metadata = build_metadata(
-            cache_id=cache_id,
-            image_sha256=image_sha256,
-            params=params,
-            original_size=(decoded.original_width, decoded.original_height),
-            result=result,
+        result = cache.load_result(unsmoothed_id) if params.smooth_iterations > 0 else None
+
+        if result is None:
+            base_params = replace(unsmoothed_params, normal_model_id=None)
+            base_id = (
+                build_cache_key(image_sha256, base_params)
+                if normal_model is not None
+                else unsmoothed_id
+            )
+            result = cache.load_result(base_id) if normal_model is not None else None
+            if result is None:
+                prepare_model_for_inference(model, models, offload_inactive)
+                result = model.run(decoded.rgb)
+                base_metadata = build_metadata(
+                    base_id, image_sha256, base_params, original_size, result,
+                )
+                cache.put(base_id, base_metadata, result)
+                if normal_model is None and params.smooth_iterations == 0:
+                    return (asdict(base_metadata), False)
+
+            if normal_model is not None:
+                prepare_model_for_inference(normal_model, models, offload_inactive)
+                result = refine_depth_with_normals(result, normal_model.run(decoded.rgb))
+                unsmoothed_metadata = build_metadata(
+                    unsmoothed_id, image_sha256, unsmoothed_params, original_size, result,
+                )
+                cache.put(unsmoothed_id, unsmoothed_metadata, result)
+                if params.smooth_iterations == 0:
+                    return (asdict(unsmoothed_metadata), False)
+
+        refined_or_smoothed = (
+            smooth_geometry(result, iterations=params.smooth_iterations)
+            if params.smooth_iterations > 0
+            else result
         )
-        cache.put(cache_id, metadata, result)
+        metadata = build_metadata(cache_id, image_sha256, params, original_size, refined_or_smoothed)
+        cache.put(cache_id, metadata, refined_or_smoothed)
         return (asdict(metadata), False)
 
 
 @router.post("/infer")
-async def infer_geometry(request: Request, file: UploadFile = File(...)) -> dict[str, object]:
+async def infer_geometry(
+    request: Request,
+    file: UploadFile = File(...),
+    model: str | None = None,
+    refine_normals: bool = False,
+    normal_model: str | None = None,
+    smooth_iterations: int = 0,
+) -> dict[str, object]:
     settings: Settings = request.app.state.settings
+    if model is None:
+        model = request.app.state.default_geometry_model
+    selection = request.app.state.geometry_models.get(model)
+    if selection is None:
+        raise HTTPException(status_code=400, detail=f"Unknown geometry model {model!r}.")
+    if not 0 <= smooth_iterations <= 10:
+        raise HTTPException(
+            status_code=400, detail="smooth_iterations must be between 0 and 10."
+        )
+    inference, params = selection
+    selected_normal_model: InferenceModel[np.ndarray, NormalMap] | None = None
+    if refine_normals:
+        normal_name = normal_model or request.app.state.default_normal_model
+        selected_normal_model = request.app.state.normal_models.get(normal_name)
+        if selected_normal_model is None:
+            raise HTTPException(
+                status_code=400, detail=f"Unknown normal refinement model {normal_name!r}."
+            )
+        params = replace(params, normal_model_id=selected_normal_model.model_id)
+    if smooth_iterations > 0:
+        params = replace(params, smooth_iterations=smooth_iterations)
     raw_bytes = await read_image_upload(file, settings.max_upload_bytes)
     cache: GeometryCache = request.app.state.geometry_cache
-    model = request.app.state.inference_model
-    peer_model = getattr(request.app.state, "appearance_model", None)
     lock: threading.Lock = request.app.state.inference_lock
 
-    params = _inference_params(settings)
     image_sha256 = compute_image_sha256(raw_bytes)
     cache_id = build_cache_key(image_sha256, params)
 
@@ -106,12 +156,12 @@ async def infer_geometry(request: Request, file: UploadFile = File(...)) -> dict
             validate_image_pixel_count(
                 cached_meta.original_width, cached_meta.original_height, settings.max_image_pixels,
             )
-            return {**asdict(cached_meta), "cached": True}
+            return {**asdict(cached_meta), "model": model, "cached": True}
 
         metadata_dict, was_cached = await run_in_threadpool(
             _infer_and_cache,
-            model,
-            peer_model,
+            inference,
+            request.app.state.models,
             settings.offload_inactive_models,
             cache,
             lock,
@@ -120,20 +170,23 @@ async def infer_geometry(request: Request, file: UploadFile = File(...)) -> dict
             params,
             raw_bytes,
             settings.max_image_pixels,
+            selected_normal_model,
         )
     except ImageTooLargeError as exc:
         raise HTTPException(status_code=413, detail=str(exc)) from exc
     except InvalidImageError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ModelUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
         if is_cuda_oom(exc):
             raise HTTPException(
                 status_code=503,
-                detail="GPU out of memory during geometry inference. Try a smaller max image size.",
+                detail="GPU out of memory during geometry inference. Try a smaller max image size or INKRAY_DEVICE=cpu.",
             ) from exc
         raise
 
-    return {**metadata_dict, "cached": was_cached}
+    return {**metadata_dict, "model": model, "cached": was_cached}
 
 
 @router.get("/{geometry_id}")

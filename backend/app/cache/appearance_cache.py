@@ -18,12 +18,13 @@ VALID_APPEARANCE_MAP_KINDS = ("albedo", "shading", "residual")
 @dataclass(frozen=True)
 class AppearanceInferenceParams:
     model_id: str
-    denoising_steps: int
-    processing_resolution: int
-    ensemble_size: int
-    seed: int
-    use_fp16: bool
-    max_image_size: int
+    denoising_steps: int = 0
+    processing_resolution: int = 0
+    ensemble_size: int = 1
+    seed: int = 0
+    use_fp16: bool = False
+    max_image_size: int = 0
+    cache_variant: str | None = None
 
 
 @dataclass(frozen=True)
@@ -48,23 +49,22 @@ class AppearanceRecordMetadata:
     shading_range: list[float] | None
     residual_range: list[float] | None
     arrays: dict[str, dict[str, object]]
+    has_shading: bool = True
+    has_residual: bool = True
 
 
 def build_appearance_cache_key(
     image_sha256: str,
     params: AppearanceInferenceParams,
 ) -> str:
+    options = asdict(params)
+    if params.cache_variant is None:
+        del options["cache_variant"]
     payload = json.dumps(
         {
             "cache_version": APPEARANCE_CACHE_FORMAT_VERSION,
             "image_sha256": image_sha256,
-            "model_id": params.model_id,
-            "denoising_steps": params.denoising_steps,
-            "processing_resolution": params.processing_resolution,
-            "ensemble_size": params.ensemble_size,
-            "seed": params.seed,
-            "use_fp16": params.use_fp16,
-            "max_image_size": params.max_image_size,
+            **options,
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -84,9 +84,9 @@ def build_appearance_metadata(
     result: AppearanceResult,
 ) -> AppearanceRecordMetadata:
     arrays: dict[str, dict[str, object]] = {
-        "albedo": {"shape": list(result.albedo.shape), "dtype": "float32"},
-        "shading": {"shape": list(result.shading.shape), "dtype": "float32"},
-        "residual": {"shape": list(result.residual.shape), "dtype": "float32"},
+        kind: {"shape": list(layer.shape), "dtype": "float32"}
+        for kind in VALID_APPEARANCE_MAP_KINDS
+        if (layer := getattr(result, kind)) is not None
     }
     return AppearanceRecordMetadata(
         id=cache_id,
@@ -106,9 +106,11 @@ def build_appearance_metadata(
         prediction_space=result.prediction_space,
         scale_conventions=dict(result.scale_conventions),
         albedo_range=_range_list(result.albedo.value_range()),
-        shading_range=_range_list(result.shading.value_range()),
-        residual_range=_range_list(result.residual.value_range()),
+        shading_range=_range_list(result.shading.value_range()) if result.shading is not None else None,
+        residual_range=_range_list(result.residual.value_range()) if result.residual is not None else None,
         arrays=arrays,
+        has_shading=result.shading is not None,
+        has_residual=result.residual is not None,
     )
 
 
@@ -136,11 +138,14 @@ class AppearanceCache:
             return None
         raw = read_cache_metadata(
             self._meta_path(cache_id), self._npz_path(cache_id), APPEARANCE_CACHE_FORMAT_VERSION,
-            VALID_APPEARANCE_MAP_KINDS,
+            ("albedo",),
         )
         if raw is None:
             return None
-        if not set(VALID_APPEARANCE_MAP_KINDS).issubset(raw["arrays"]):
+        expected_maps = {"albedo", *(
+            kind for kind in ("shading", "residual") if raw.get(f"has_{kind}", True)
+        )}
+        if set(raw["arrays"]) != expected_maps:
             return None
         try:
             return AppearanceRecordMetadata(**raw)
@@ -154,9 +159,8 @@ class AppearanceCache:
         result: AppearanceResult,
     ) -> None:
         payload: dict[str, np.ndarray] = {
-            "albedo": np.ascontiguousarray(result.albedo.data, dtype=np.float32),
-            "shading": np.ascontiguousarray(result.shading.data, dtype=np.float32),
-            "residual": np.ascontiguousarray(result.residual.data, dtype=np.float32),
+            kind: np.ascontiguousarray(getattr(result, kind).data, dtype=np.float32)
+            for kind in metadata.arrays
         }
         write_npz_and_json(
             cache_dir=self.cache_dir,
@@ -174,8 +178,8 @@ class AppearanceCache:
         with np.load(self._npz_path(cache_id), allow_pickle=False) as archive:
             return AppearanceResult(
                 albedo=AlbedoMap(archive["albedo"]),
-                shading=ShadingMap(archive["shading"]),
-                residual=ResidualMap(archive["residual"]),
+                shading=ShadingMap(archive["shading"]) if meta.has_shading else None,
+                residual=ResidualMap(archive["residual"]) if meta.has_residual else None,
                 model_id=meta.model_id,
                 denoising_steps=meta.denoising_steps,
                 processing_resolution=meta.processing_resolution,
@@ -190,7 +194,8 @@ class AppearanceCache:
         cache_id: str,
         kind: AppearanceMapKind,
     ) -> tuple[bytes, tuple[int, ...], str] | None:
-        if kind not in VALID_APPEARANCE_MAP_KINDS or not self.has(cache_id):
+        metadata = self.get_metadata(cache_id)
+        if metadata is None or kind not in metadata.arrays:
             return None
         with np.load(self._npz_path(cache_id), allow_pickle=False) as archive:
             if kind not in archive:

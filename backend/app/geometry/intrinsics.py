@@ -85,3 +85,15 @@ class CameraIntrinsics:
         y_norm = (v - cy) / fy
         x_norm = (u - cx - skew * y_norm) / fx
         return np.array([x_norm * depth, y_norm * depth, depth], dtype=np.float32)
+
+    def unproject_depth(self, depth: np.ndarray) -> np.ndarray:
+        height, width = depth.shape
+        return self.pixel_rays(width, height) * depth[..., None]
+
+    def pixel_rays(self, width: int, height: int) -> np.ndarray:
+        k = self.to_pixel_matrix(width, height)
+        u = np.arange(width, dtype=np.float32) + 0.5
+        v = np.arange(height, dtype=np.float32) + 0.5
+        y = (v[:, None] - k[1, 2]) / k[1, 1]
+        x = (u - k[0, 2] - k[0, 1] * y) / k[0, 0]
+        return np.stack((x, np.broadcast_to(y, x.shape), np.ones_like(x)), axis=-1)

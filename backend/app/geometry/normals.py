@@ -48,3 +48,26 @@ class NormalMap:
 
     def to_threejs(self) -> np.ndarray:
         return opencv_normals_to_threejs(self.data)
+
+    @classmethod
+    def from_camera_space(cls, normals: np.ndarray) -> "NormalMap":
+        """Convert Y-up, Z-toward-viewer normals (Marigold convention) into Inkray OpenCV space."""
+        return cls(np.asarray(normals, dtype=np.float32) * np.array([1.0, -1.0, -1.0], dtype=np.float32))
+
+    @classmethod
+    def from_points(cls, points: np.ndarray) -> "NormalMap":
+        def tangent(axis: int) -> np.ndarray:
+            grid = np.moveaxis(points, axis, 0)
+            forward = np.full_like(grid, np.nan)
+            backward = np.full_like(grid, np.nan)
+            forward[:-1] = backward[1:] = grid[1:] - grid[:-1]
+            # Prefer the smaller depth change when choosing a neighbor.
+            ahead = np.nan_to_num(np.abs(forward[..., 2]), nan=np.inf)
+            behind = np.nan_to_num(np.abs(backward[..., 2]), nan=np.inf)
+            return np.moveaxis(np.where((ahead <= behind)[..., None], forward, backward), 0, axis)
+
+        normals = np.cross(tangent(0), tangent(1))
+        lengths = np.linalg.norm(normals, axis=-1, keepdims=True)
+        np.divide(normals, lengths, out=normals, where=np.isfinite(lengths) & (lengths > 0))
+        normals[~np.isfinite(lengths[..., 0]) | (lengths[..., 0] == 0)] = np.nan
+        return cls(normals)
