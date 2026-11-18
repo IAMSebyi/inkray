@@ -384,18 +384,28 @@ function isCornerEdgeConnected(
   const { width, neighborFlags } = gridIndex;
   const anchorRow = Math.floor(anchorIdx / width);
   const anchorCol = anchorIdx - anchorRow * width;
-  if (cornerCol === anchorCol && cornerRow === anchorRow) {
-    return true;
-  }
   const dc = cornerCol - anchorCol;
   const dr = cornerRow - anchorRow;
+  if (dc === 0 && dr === 0) {
+    return true;
+  }
   const flags = neighborFlags[anchorIdx] ?? 0;
-  for (let k = 0; k < GRAPH_MOVES.length; k++) {
-    const move = GRAPH_MOVES[k];
-    if (!move) continue;
-    if (move[1] === dc && move[2] === dr) {
-      return (flags & move[0]) !== 0;
-    }
+  if (dr === 0) {
+    if (dc === 1) return (flags & EDGE_RIGHT) !== 0;
+    if (dc === -1) return (flags & EDGE_LEFT) !== 0;
+    return false;
+  }
+  if (dr === 1) {
+    if (dc === 0) return (flags & EDGE_DOWN) !== 0;
+    if (dc === 1) return (flags & EDGE_DOWN_RIGHT) !== 0;
+    if (dc === -1) return (flags & EDGE_DOWN_LEFT) !== 0;
+    return false;
+  }
+  if (dr === -1) {
+    if (dc === 0) return (flags & EDGE_UP) !== 0;
+    if (dc === 1) return (flags & EDGE_UP_RIGHT) !== 0;
+    if (dc === -1) return (flags & EDGE_UP_LEFT) !== 0;
+    return false;
   }
   return false;
 }
@@ -578,27 +588,53 @@ export function stampCurvedBrushDab(params: {
 
         let sumDist = 0;
         let sumW = 0;
-        const corners: ReadonlyArray<readonly [number, number, number]> = [
-          [c0, r0, (1 - wx) * (1 - wy)],
-          [c1, r0, wx * (1 - wy)],
-          [c0, r1, (1 - wx) * wy],
-          [c1, r1, wx * wy],
-        ];
-        for (let k = 0; k < 4; k++) {
-          const corner = corners[k];
-          if (!corner) continue;
-          const [cc, rr, w] = corner;
-          if (w <= 0) continue;
-          const cIdx = rr * infW + cc;
+        const w00 = (1 - wx) * (1 - wy);
+        if (w00 > 0) {
+          const cIdx = r0 * infW + c0;
           if (
-            (componentMask[cIdx] ?? 0) === 0 ||
-            (geo.seenGen[cIdx] ?? 0) !== geo.generation ||
-            !isCornerEdgeConnected(gridIndex, anchorIdx, cc, rr)
+            (componentMask[cIdx] ?? 0) !== 0 &&
+            (geo.seenGen[cIdx] ?? 0) === geo.generation &&
+            isCornerEdgeConnected(gridIndex, anchorIdx, c0, r0)
           ) {
-            continue;
+            sumDist += (geo.distArr[cIdx] ?? 0) * w00;
+            sumW += w00;
           }
-          sumDist += (geo.distArr[cIdx] ?? 0) * w;
-          sumW += w;
+        }
+        const w10 = wx * (1 - wy);
+        if (w10 > 0) {
+          const cIdx = r0 * infW + c1;
+          if (
+            (componentMask[cIdx] ?? 0) !== 0 &&
+            (geo.seenGen[cIdx] ?? 0) === geo.generation &&
+            isCornerEdgeConnected(gridIndex, anchorIdx, c1, r0)
+          ) {
+            sumDist += (geo.distArr[cIdx] ?? 0) * w10;
+            sumW += w10;
+          }
+        }
+        const w01 = (1 - wx) * wy;
+        if (w01 > 0) {
+          const cIdx = r1 * infW + c0;
+          if (
+            (componentMask[cIdx] ?? 0) !== 0 &&
+            (geo.seenGen[cIdx] ?? 0) === geo.generation &&
+            isCornerEdgeConnected(gridIndex, anchorIdx, c0, r1)
+          ) {
+            sumDist += (geo.distArr[cIdx] ?? 0) * w01;
+            sumW += w01;
+          }
+        }
+        const w11 = wx * wy;
+        if (w11 > 0) {
+          const cIdx = r1 * infW + c1;
+          if (
+            (componentMask[cIdx] ?? 0) !== 0 &&
+            (geo.seenGen[cIdx] ?? 0) === geo.generation &&
+            isCornerEdgeConnected(gridIndex, anchorIdx, c1, r1)
+          ) {
+            sumDist += (geo.distArr[cIdx] ?? 0) * w11;
+            sumW += w11;
+          }
         }
         if (sumW <= 0) {
           surfDist = geo.distArr[anchorIdx] ?? Infinity;

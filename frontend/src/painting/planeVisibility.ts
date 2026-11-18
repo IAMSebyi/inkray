@@ -316,11 +316,64 @@ export function computeSurfaceOwnerGrid(
   }
 
   const intr = parseNormalizedIntrinsics(geometry.metadata.intrinsics);
-  const footprints = surfaces.map((s) => getEffectiveFootprint(s));
   const surfaceLimit = Math.min(surfaces.length, 255);
+  const prepared = new Array<{
+    ox: number;
+    oy: number;
+    oz: number;
+    nx: number;
+    ny: number;
+    nz: number;
+    ux: number;
+    uy: number;
+    uz: number;
+    vx: number;
+    vy: number;
+    vz: number;
+    planeD: number;
+    minU: number;
+    maxU: number;
+    minV: number;
+    maxV: number;
+    fitRms: number;
+  }>(surfaceLimit);
+
+  for (let sIdx = 0; sIdx < surfaceLimit; sIdx++) {
+    const surface = surfaces[sIdx];
+    if (!surface) continue;
+    const fp = getEffectiveFootprint(surface);
+    const { origin, normal, uAxis, vAxis } = surface.frame;
+    prepared[sIdx] = {
+      ox: origin[0],
+      oy: origin[1],
+      oz: origin[2],
+      nx: normal[0],
+      ny: normal[1],
+      nz: normal[2],
+      ux: uAxis[0],
+      uy: uAxis[1],
+      uz: uAxis[2],
+      vx: vAxis[0],
+      vy: vAxis[1],
+      vz: vAxis[2],
+      planeD: normal[0] * origin[0] + normal[1] * origin[1] + normal[2] * origin[2],
+      minU: fp.minU,
+      maxU: fp.maxU,
+      minV: fp.minV,
+      maxV: fp.maxV,
+      fitRms: surface.rmsError,
+    };
+  }
+
+  const normals = geometry.normals;
+  const invFx = 1 / intr.fx;
+  const invFy = 1 / intr.fy;
+  const invW = 1 / w;
+  const invH = 1 / h;
 
   for (let row = 0; row < h; row++) {
-    const vImg = (row + 0.5) / h;
+    const vImg = (row + 0.5) * invH;
+    const yNorm = (vImg - intr.cy) * invFy;
     const rowOffset = row * w;
     for (let col = 0; col < w; col++) {
       const idx = rowOffset + col;
@@ -330,24 +383,60 @@ export function computeSurfaceOwnerGrid(
         continue;
       }
 
-      const uImg = (col + 0.5) / w;
-      const obsNormal = geometry.normals ? readNormalOpenCV(geometry, col, row) : null;
+      const uImg = (col + 0.5) * invW;
+      const xNorm = (uImg - intr.cx - intr.skew * yNorm) * invFx;
+
+      let hasNormal = false;
+      let onx = 0;
+      let ony = 0;
+      let onz = 0;
+      if (normals) {
+        const nBase = idx * 3;
+        const rx = normals[nBase] ?? 0;
+        const ry = normals[nBase + 1] ?? 0;
+        const rz = normals[nBase + 2] ?? 0;
+        if (Number.isFinite(rx) && Number.isFinite(ry) && Number.isFinite(rz)) {
+          const len = Math.hypot(rx, ry, rz);
+          if (len > 1e-6) {
+            hasNormal = true;
+            onx = rx / len;
+            ony = ry / len;
+            onz = rz / len;
+          }
+        }
+      }
 
       for (let sIdx = 0; sIdx < surfaceLimit; sIdx++) {
-        const surface = surfaces[sIdx];
-        const fp = footprints[sIdx];
-        if (!surface || !fp) continue;
-        const res = PlaneVisibility.evaluatePixel(
-          { x: uImg, y: vImg },
-          intr,
-          surface.frame,
-          fp,
-          true,
-          depthVal,
-          obsNormal,
-          { fitRms: surface.rmsError },
-        );
-        if (res.visible) {
+        const s = prepared[sIdx];
+        if (!s) continue;
+
+        const denom = s.nx * xNorm + s.ny * yNorm + s.nz;
+        if (Math.abs(denom) < 1e-6) continue;
+
+        const t = s.planeD / denom;
+        if (!Number.isFinite(t) || t <= 1e-4) continue;
+
+        const dx = xNorm * t - s.ox;
+        const dy = yNorm * t - s.oy;
+        const dz = t - s.oz;
+        const u = dx * s.ux + dy * s.uy + dz * s.uz;
+        if (u < s.minU || u > s.maxU) continue;
+        const v = dx * s.vx + dy * s.vy + dz * s.vz;
+        if (v < s.minV || v > s.maxV) continue;
+
+        const tol = clamp(Math.max(0.035 * t, 2.5 * s.fitRms), 0.015 * t, 0.14 * t);
+        const absDiff = Math.abs(depthVal - t);
+        if (absDiff > tol) continue;
+
+        if (hasNormal && onx * s.nx + ony * s.ny + onz * s.nz < 0.45) {
+          continue;
+        }
+
+        const innerTol = tol * 0.85;
+        const outerTol = tol * 1.0525;
+        const st = clamp((absDiff - outerTol) / (innerTol - outerTol), 0, 1);
+        const alpha = st * st * (3 - 2 * st);
+        if (alpha >= 0.5) {
           out[idx] = sIdx + 1;
           break;
         }

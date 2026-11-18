@@ -118,6 +118,46 @@ describe('ImageMeshBuilder', () => {
     meshGeom.dispose();
   });
 
+  it('builds a decimated continuous mesh when stride > 1 while respecting depth jumps', () => {
+    const w = 24;
+    const h = 24;
+    const occluder = { minCol: 8, maxCol: 14, minRow: 8, maxRow: 14, depth: 1.5 };
+    const scene = createSyntheticPlanarScene({
+      width: w,
+      height: h,
+      planeOrigin: [0, 0, 4.0],
+      planeNormal: [0, 0, -1],
+      occluders: [occluder],
+    });
+
+    const fullMesh = ImageMeshBuilder.build(scene.geometry, { coordinateSystem: 'opencv' });
+    const stridedMesh = ImageMeshBuilder.build(scene.geometry, {
+      coordinateSystem: 'opencv',
+      stride: 2,
+    });
+
+    const fullIndex = fullMesh.getIndex();
+    const stridedIndex = stridedMesh.getIndex();
+    const posAttr = stridedMesh.getAttribute('position');
+    expect(fullIndex).not.toBeNull();
+    expect(stridedIndex).not.toBeNull();
+    if (fullIndex && stridedIndex) {
+      expect(stridedIndex.count).toBeGreaterThan(0);
+      expect(stridedIndex.count).toBeLessThan(fullIndex.count / 2);
+
+      const idxArr = stridedIndex.array;
+      for (let i = 0; i < idxArr.length; i += 3) {
+        const za = posAttr.getZ(idxArr[i] ?? 0);
+        const zb = posAttr.getZ(idxArr[i + 1] ?? 0);
+        const zc = posAttr.getZ(idxArr[i + 2] ?? 0);
+        expect(Math.max(za, zb, zc) - Math.min(za, zb, zc)).toBeLessThan(0.5);
+      }
+    }
+
+    fullMesh.dispose();
+    stridedMesh.dispose();
+  });
+
   it('returns an empty position buffer for grids smaller than 2x2', () => {
     const scene = createSyntheticPlanarScene({
       width: 1,

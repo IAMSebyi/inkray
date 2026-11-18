@@ -41,7 +41,28 @@ export interface ActiveImageStrokePreview {
   layerWidth: number;
   layerHeight: number;
   alphaMask: Uint8Array;
+  bounds: DirtyTexelBounds;
+  dirtyHistory: ReadonlyArray<{ revision: number; bounds: DirtyTexelBounds }>;
   revision: number;
+}
+
+export function getDirtyBoundsSinceRevision(
+  preview: ActiveImageStrokePreview,
+  sinceRevision: number,
+): DirtyTexelBounds {
+  const history = preview.dirtyHistory;
+  const earliest = history[0];
+  if (!earliest || sinceRevision < earliest.revision - 1) {
+    return preview.bounds;
+  }
+  let merged: DirtyTexelBounds | null = null;
+  for (let i = 0; i < history.length; i++) {
+    const entry = history[i];
+    if (entry && entry.revision > sinceRevision) {
+      merged = mergeDirtyBounds(merged, entry.bounds);
+    }
+  }
+  return merged ?? preview.bounds;
 }
 
 export function computeImagePaintSpec(imageSize: Size2D, maxEdge = 1536): ImageTexelSpec {
@@ -253,6 +274,7 @@ interface ActiveSessionState {
   imageSize: Size2D;
   alphaMask: Uint8Array;
   bounds: DirtyTexelBounds | null;
+  dirtyHistory: Array<{ revision: number; bounds: DirtyTexelBounds }>;
   revision: number;
   lastOnSurfacePoint: Point2D | null;
   // Curved-only anchor parameters:
@@ -262,6 +284,22 @@ interface ActiveSessionState {
   gridIndex: SurfaceGridIndex | null;
   // 2D-only step spacing:
   pixelDiameter: number;
+}
+
+const MAX_DIRTY_HISTORY = 32;
+
+function pushDirtyHistory(
+  history: Array<{ revision: number; bounds: DirtyTexelBounds }>,
+  revision: number,
+  bounds: DirtyTexelBounds | null,
+): void {
+  if (!bounds) {
+    return;
+  }
+  history.push({ revision, bounds });
+  if (history.length > MAX_DIRTY_HISTORY) {
+    history.shift();
+  }
 }
 
 export class ImageSpaceBrushEngine {
@@ -285,6 +323,8 @@ export class ImageSpaceBrushEngine {
       layerWidth: s.spec.width,
       layerHeight: s.spec.height,
       alphaMask: s.alphaMask,
+      bounds: s.bounds,
+      dirtyHistory: s.dirtyHistory,
       revision: s.revision,
     };
   }
@@ -323,6 +363,9 @@ export class ImageSpaceBrushEngine {
       workspace: this.workspace,
     });
 
+    const dirtyHistory: Array<{ revision: number; bounds: DirtyTexelBounds }> = [];
+    pushDirtyHistory(dirtyHistory, 1, bounds);
+
     this.session = {
       id: `img-stroke-${nextImageStrokeSeq++}`,
       layer: 'curved',
@@ -332,6 +375,7 @@ export class ImageSpaceBrushEngine {
       imageSize,
       alphaMask,
       bounds,
+      dirtyHistory,
       revision: 1,
       lastOnSurfacePoint: { x: imagePoint.x, y: imagePoint.y },
       surfaceRadius,
@@ -370,6 +414,9 @@ export class ImageSpaceBrushEngine {
       hardness,
     );
 
+    const dirtyHistory: Array<{ revision: number; bounds: DirtyTexelBounds }> = [];
+    pushDirtyHistory(dirtyHistory, 1, bounds);
+
     this.session = {
       id: `img-stroke-${nextImageStrokeSeq++}`,
       layer: 'fallback-2d',
@@ -379,6 +426,7 @@ export class ImageSpaceBrushEngine {
       imageSize,
       alphaMask,
       bounds,
+      dirtyHistory,
       revision: 1,
       lastOnSurfacePoint: { x: imagePoint.x, y: imagePoint.y },
       surfaceRadius: 0,
@@ -441,6 +489,7 @@ export class ImageSpaceBrushEngine {
       if (stepBounds) {
         s.bounds = mergeDirtyBounds(s.bounds, stepBounds);
         s.revision++;
+        pushDirtyHistory(s.dirtyHistory, s.revision, stepBounds);
         return true;
       }
       return false;
@@ -474,13 +523,14 @@ export class ImageSpaceBrushEngine {
       if (bounds) {
         s.bounds = mergeDirtyBounds(s.bounds, bounds);
         s.revision++;
+        pushDirtyHistory(s.dirtyHistory, s.revision, bounds);
         return true;
       }
       return false;
     }
 
     const dist = Math.hypot(imagePoint.x - prev.x, imagePoint.y - prev.y);
-    const stepSpacing = Math.max(2, s.pixelDiameter * 0.18);
+    const stepSpacing = Math.max(2.5, s.pixelDiameter * 0.25);
     if (dist < stepSpacing) {
       return false;
     }
@@ -500,6 +550,7 @@ export class ImageSpaceBrushEngine {
         if (dirty) {
           s.bounds = mergeDirtyBounds(s.bounds, dirty);
           s.revision++;
+          pushDirtyHistory(s.dirtyHistory, s.revision, dirty);
         }
         return dirty !== null;
       }
@@ -522,6 +573,7 @@ export class ImageSpaceBrushEngine {
     if (dirty) {
       s.bounds = mergeDirtyBounds(s.bounds, dirty);
       s.revision++;
+      pushDirtyHistory(s.dirtyHistory, s.revision, dirty);
       return true;
     }
     return false;
